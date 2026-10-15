@@ -1,0 +1,20 @@
+{
+  "id": "m5stack-stopwatch",
+  "name": "M5Stack StopWatch C152",
+  "chip": "esp32s3",
+  "flash_bytes": 16777216,
+  "psram_bytes": 8388608,
+  "display": {
+    "width": 466,
+    "height": 466,
+    "controller": "CO5300"
+  },
+  "idf_version": "5.5.3",
+  "maintainer": "jiachen",
+  "validation": {
+    "build": "passed",
+    "usb_diagnostics": "passed",
+    "display_buttons": "user confirmed",
+    "phone_agent": "unverified"
+  }
+}

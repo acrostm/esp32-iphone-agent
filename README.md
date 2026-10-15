@@ -1,3 +1,5 @@
+> **M5Stack StopWatch C152:** [native ESP-IDF setup](docs/boards/m5stack-stopwatch.md) · [hardware support matrix](docs/hardware-support.md). This board uses its own Arduino-free build/flash path.
+
 <div align="center">
 
 <img src="docs/images/logo.png" alt="ESP32 Agent logo" width="160">

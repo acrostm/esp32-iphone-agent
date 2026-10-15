@@ -34,6 +34,43 @@ jobs:
       - name: Host tests (bplist, GOP buffer)
         run: make -C hardware/tests
 
+  native-host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Native protocol, display model, shared C and packaging tests
+        run: python3 hardware/tests/native/run.py
+
+  native-firmware:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.3
+    strategy:
+      matrix:
+        board: [m5stack-stopwatch]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build, audit dependencies and verify board package
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          python hardware/build.py --board "${{ matrix.board }}" --build --verify
+      - name: Upload firmware and matching debug artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.board }}
+          path: |
+            hardware/build/${{ matrix.board }}/*.bin
+            hardware/build/${{ matrix.board }}/*.elf
+            hardware/build/${{ matrix.board }}/*.map
+            hardware/build/${{ matrix.board }}/firmware-manifest.json
+            hardware/build/${{ matrix.board }}/flasher_args.json
+            hardware/build/${{ matrix.board }}/project_description.json
+            hardware/build/${{ matrix.board }}/compile_commands.json
+            hardware/build/${{ matrix.board }}/config/sdkconfig.h
+            hardware/build/${{ matrix.board }}/bootloader/bootloader.bin
+            hardware/build/${{ matrix.board }}/partition_table/partition-table.bin
+          if-no-files-found: error
+
   server:  # legacy v0.1.0 architecture, kept working
     runs-on: ubuntu-latest
     strategy:
