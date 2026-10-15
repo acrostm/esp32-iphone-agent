@@ -1,3 +1,5 @@
+> **M5Stack StopWatch C152：**[原生 ESP-IDF 安装](docs/boards/m5stack-stopwatch.zh_CN.md) · [硬件支持矩阵](docs/hardware-support.zh_CN.md)。此型号使用独立的无 Arduino 编译／烧录入口。
+
 <div align="center">
 
 <img src="docs/images/logo.png" alt="ESP32 Agent logo" width="160">

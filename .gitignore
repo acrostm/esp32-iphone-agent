@@ -22,3 +22,10 @@ hardware/hid_bridge/build/
 hardware/tests/test
 hardware/tests/test.dSYM/
 hardware/tools/out/
+
+# Native ESP-IDF local configuration and generated dependencies
+.idf-local.json
+hardware/esp-idf/managed_components/
+hardware/esp-idf/sdkconfig
+hardware/esp-idf/sdkconfig.old
+native-build.log

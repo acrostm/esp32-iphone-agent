@@ -1,0 +1,9 @@
+dependencies:
+  idf: "==5.5.3"
+  espressif/esp_tinyusb: "==2.4.0"
+  espressif/mdns: "==1.14.0"
+  espressif/libsodium: "==1.0.22~1"
+  m5stack/m5unified:
+    git: https://github.com/m5stack/M5Unified.git
+    version: e125e73f28b6b83e621e48df432af426bb2ff935
+  m5stack/m5gfx: "==0.2.33"
