@@ -32,10 +32,13 @@ extension BoardTransport {
 /// What gestures need from the board (CommandChannel, or a fake in tests).
 @MainActor protocol HIDDevice: AnyObject {
     var links: Int { get }
+    var maxCommandBytes: Int { get }
     var connected: Bool { get }
     @discardableResult func send(_ command: String) async throws -> String
     func waitConnected(_ timeout: TimeInterval) async -> Bool
 }
+
+extension HIDDevice { var maxCommandBytes: Int { 164 } }
 
 /// A FIFO async mutex for main-actor code.
 @MainActor final class AsyncLock {
@@ -70,6 +73,7 @@ extension BoardTransport {
     init(transport: BoardTransport? = nil) { self.transport = transport }
 
     var connected: Bool { transport?.isConnected ?? false }
+    var maxCommandBytes: Int { max(0, (transport?.maxWrite ?? 180) - 16) }
 
     /// The transport (re)connected and subscribed.
     func linkUp() {
@@ -125,6 +129,11 @@ extension BoardTransport {
         } catch let e as BoardTimeout {
             guard command != "ping", !command.hasPrefix("stream"), let onTimeout else { throw e }
             await onTimeout(command)
+            let name = String(command.split(separator:" ").first ?? "")
+            if ["type","key","click","press","move","scroll","homescreen"].contains(name) {
+                DebugLog.write("cmd timeout: outcome unknown; refusing to duplicate a non-idempotent action")
+                throw e
+            }
             DebugLog.write("cmd retry after timeout: \(command.prefix(40))")
             return try await send(command, timeout: nil)
         }

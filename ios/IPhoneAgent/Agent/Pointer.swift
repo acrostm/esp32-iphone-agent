@@ -1,5 +1,51 @@
 import Foundation
 
+enum TextEntryMode: String, CaseIterable { case automatic, keyboard, clipboard }
+enum KeyCombo {
+    static func normalize(_ combo: String) throws -> String {
+        guard !combo.contains("\n"), !combo.contains("\r"), !combo.contains("\0") else {
+            throw LLMError(message:"Invalid keyboard shortcut.")
+        }
+        let parts = combo.split(separator:"+",omittingEmptySubsequences:false).map { $0.trimmingCharacters(in:.whitespaces) }
+        guard !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty }) else { throw LLMError(message:"Empty keyboard shortcut.") }
+        let aliases = ["command":"cmd","meta":"cmd","control":"ctrl","option":"alt","return":"enter","escape":"esc","delete":"backspace"]
+        return parts.map { part in
+            let lower = part.lowercased()
+            return aliases[lower] ?? (parts.count > 1 || part.count > 1 ? lower : part)
+        }.joined(separator:"+")
+    }
+}
+
+enum TextEntryOperation: Equatable { case text(String), key(String), paste(String) }
+
+/// Plan the entire input before sending anything; UTF-8 must never be split or
+/// partially typed before discovering an unsupported character later in the text.
+enum TextEntryPlan {
+    static func make(_ text: String, mode: TextEntryMode, limit: Int) throws -> [TextEntryOperation] {
+        guard text.utf8.count <= 65536 else { throw LLMError(message:"Text input exceeds 64 KB.") }
+        guard !text.isEmpty else { return [] }
+        let unicode = text.unicodeScalars.contains { $0.value > 127 }
+        if mode == .clipboard || (mode == .automatic && unicode) { return [.paste(text)] }
+        guard !unicode else { throw LLMError(message:"Keyboard mode supports ASCII only. Select Automatic or Clipboard for Unicode text.") }
+        let normalized = text.replacingOccurrences(of:"\r\n",with:"\n").replacingOccurrences(of:"\r",with:"\n")
+        guard normalized.utf8.allSatisfy({ $0 == 9 || $0 == 10 || (32...126).contains($0) }), limit >= 1 else {
+            throw LLMError(message:"Unsupported control character or text command size.")
+        }
+        var result: [TextEntryOperation] = [], part = ""
+        func flush() { if !part.isEmpty { result.append(.text(part)); part = "" } }
+        for c in normalized {
+            if c == "\n" || c == "\t" {
+                flush(); result.append(.key(c == "\n" ? "enter" : "tab"))
+            } else {
+                part.append(c)
+                if part.utf8.count >= limit { flush() }
+            }
+        }
+        flush()
+        return result
+    }
+}
+
 /// Touch-like gestures on the phone, built from relative mouse moves. Port of phone.py.
 ///
 /// The pointer is relative, so the app tracks where it is (in mouse units) and moves from there; every few
@@ -30,6 +76,8 @@ import Foundation
     private(set) var seen: [String: [(Double, Double)]] = ["x": [], "y": []]
     @Published private(set) var quality: Double?  // pointer error at the last check, fraction of the screen
     private(set) var aspect: Double?  // frame width / height when calibrated
+    var textEntryMode: () -> TextEntryMode = { .automatic }
+    var pasteText: ((String) async throws -> Void)?
     var log: (String) -> Void = { print($0) }
     /// The device screen's width / height (iPhone or iPad), stored with a calibration.
     var screenAspect: () -> Double = { 9 / 19.5 }
@@ -290,8 +338,21 @@ import Foundation
         try await device.send("scroll \(lines) 0")
     }
 
-    func type(_ text: String) async throws { try await device.send("type \(text)") }
-    func key(_ combo: String) async throws { try await device.send("key \(combo)") }
+    func type(_ text: String) async throws {
+        let limit = min(160, device.maxCommandBytes - 5)
+        let plan = try TextEntryPlan.make(text, mode:textEntryMode(), limit:limit)
+        for operation in plan {
+            try Task.checkCancellation()
+            switch operation {
+            case .text(let chunk): try await device.send("type " + chunk)
+            case .key(let key): try await device.send("key " + key)
+            case .paste(let value):
+                guard let pasteText else { throw LLMError(message:"Clipboard text input is not available.") }
+                try await pasteText(value)
+            }
+        }
+    }
+    func key(_ combo: String) async throws { try await device.send("key " + KeyCombo.normalize(combo)) }
     /// The board's consumer-control Home key ("AC Home"), which iOS treats like a keyboard's home key. Boards
     /// without it (older firmware) answer an error: then Cmd+H and the flick up from the home bar (a flick, not
     /// a rest: resting opens the app switcher).

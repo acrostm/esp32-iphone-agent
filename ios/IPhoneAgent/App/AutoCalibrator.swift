@@ -138,7 +138,7 @@ import UIKit
         }
         do {
             try await app.feed.stream(true)
-            defer { if !app.agent.running { Task { try? await app.feed.stream(false) } } }
+            defer { if !app.agent.running && app.board.status?.ui == nil { Task { try? await app.feed.stream(false) } } }
             let ok = try await app.pointer.startCalibration { [weak self] i in
                 self?.phase = [.homing, .probeA, .probeB][min(i, 2)]
             }

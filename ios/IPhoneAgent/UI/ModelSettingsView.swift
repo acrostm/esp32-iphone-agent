@@ -46,6 +46,9 @@ struct ModelSettingsView: View {
                     }
                 }
                 .disabled(testing || !app.modelReady)
+                if let error = app.modelError {
+                    Text(verbatim: error).font(.caption).foregroundStyle(Palette.stop).textSelection(.enabled)
+                }
             }
             Section {
                 DisclosureGroup("Advanced", isExpanded: $advanced) {
@@ -55,6 +58,24 @@ struct ModelSettingsView: View {
                     Picker("Token parameter", selection: $settings.tokenParam) {
                         ForEach(["auto"] + LLMClient.tokenParams, id: \.self) { Text(verbatim: $0) }
                     }
+                    Picker("Text input", selection:$settings.textEntryMode) {
+                        Text("Automatic (keyboard / Unicode clipboard)").tag(TextEntryMode.automatic)
+                        Text("Keyboard (ASCII)").tag(TextEntryMode.keyboard)
+                        Text("Clipboard paste").tag(TextEntryMode.clipboard)
+                    }
+                    Text("Typing uses the same transport for every model. Clipboard mode replaces the local clipboard and may require iOS paste permission.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("Temperature", selection: $settings.temperatureMode) {
+                        Text("Automatic compatibility").tag(TemperatureMode.automatic)
+                        Text("Use server default (omit)").tag(TemperatureMode.omit)
+                        Text("Custom value").tag(TemperatureMode.custom)
+                    }
+                    if settings.temperatureMode == .custom {
+                        TextField("Temperature value", value: $settings.temperatureValue, format: .number)
+                            .keyboardType(.decimalPad)
+                    }
+                    Text("Automatic retries without temperature only when the server explicitly rejects it. Custom values are sent unchanged. This setting takes precedence over Extra body JSON.")
+                        .font(.caption).foregroundStyle(.secondary)
                     TextField("Extra body JSON", text: $settings.extraBody, prompt: Text(verbatim: "{}"))
                         .font(.body.monospaced())
                 }

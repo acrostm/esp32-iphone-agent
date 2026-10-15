@@ -1,6 +1,116 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Typing uses the same transport for every model. Clipboard mode replaces the local clipboard and may require iOS paste permission." : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "所有模型使用相同输入路径。剪贴板模式会替换本机剪贴板，可能需要 iOS 粘贴权限。"
+          }
+        }
+      }
+    },
+    "Clipboard paste" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "剪贴板粘贴"
+          }
+        }
+      }
+    },
+    "Keyboard (ASCII)" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "键盘（ASCII）"
+          }
+        }
+      }
+    },
+    "Automatic (keyboard / Unicode clipboard)" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动（键盘／Unicode 剪贴板）"
+          }
+        }
+      }
+    },
+    "Text input" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文本输入"
+          }
+        }
+      }
+    },
+    "Automatic retries without temperature only when the server explicitly rejects it. Custom values are sent unchanged. This setting takes precedence over Extra body JSON." : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动模式仅在服务端明确拒绝温度参数时移除后重试。自定义值原样发送。本选项优先于附加请求 JSON。"
+          }
+        }
+      }
+    },
+    "Temperature value" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "温度值"
+          }
+        }
+      }
+    },
+    "Custom value" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自定义数值"
+          }
+        }
+      }
+    },
+    "Use server default (omit)" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用服务端默认值（不发送）"
+          }
+        }
+      }
+    },
+    "Automatic compatibility" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动兼容"
+          }
+        }
+      }
+    },
+    "Temperature" : {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "温度参数"
+          }
+        }
+      }
+    },
     "" : {
       "shouldTranslate" : false
     },

@@ -245,8 +245,11 @@ struct BrainPage: View {
                     Panel { PickedModelRow(settings: settings) }
                 }
             case false?:
-                Label("Could not reach the model. Check the URL and key.", systemImage: "xmark.octagon.fill")
-                    .foregroundStyle(Palette.stop).font(.subheadline)
+                VStack(spacing: Space.s) {
+                    Label("Could not reach the model. Check the URL and key.", systemImage: "xmark.octagon.fill")
+                    if let error = app.modelError { Text(verbatim: error).font(.caption).textSelection(.enabled) }
+                }
+                .foregroundStyle(Palette.stop).font(.subheadline)
             case nil:
                 EmptyView()
             }

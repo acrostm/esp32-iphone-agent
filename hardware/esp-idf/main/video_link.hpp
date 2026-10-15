@@ -12,6 +12,6 @@ struct VideoStats {
   uint32_t kbps, idr_ms, gop_bytes;
   float fps;
   uint32_t config_bytes, frames, overflows;
-  bool waiting_idr;
+  bool waiting_idr, replayable, streaming;
 };
 VideoStats video_stats();

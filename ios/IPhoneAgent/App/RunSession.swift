@@ -216,7 +216,8 @@ extension AppModel {
     func agentFinished() {
         ended()
         if let last = agent.steps.last { say("finished: \(last["action"]?.str ?? "") \(last["reason"]?.str ?? last["answer"]?.str ?? "")") }
-        Task { try? await feed.stream(false) }
+        // Keep the decoder's dependency chain alive between runs. A delayed stop
+        // from the old run must never disable a new run or require a reclaimed IDR.
         endBackgroundTask()
     }
 

@@ -36,11 +36,12 @@ final class StubProtocol: URLProtocol {
 
 /// Port of server/tests/test_llm.py, plus streaming.
 @MainActor final class LLMTests: XCTestCase {
-    func client(_ model: String, extra: [String: Any] = [:], tokenParam: String = "auto") -> LLMClient {
+    func client(_ model: String, extra: [String: Any] = [:], tokenParam: String = "auto", temperatureMode: TemperatureMode = .automatic,
+                temperatureValue: Double = 0) -> LLMClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubProtocol.self]
-        return LLMClient(baseURL: "http://test/v1/", model: model, extra: extra, tokenParam: tokenParam,
-                         session: URLSession(configuration: config))
+        return LLMClient(baseURL: "http://test/v1/", model: model, extra: extra, tokenParam: tokenParam, temperatureMode: temperatureMode,
+                         temperatureValue: temperatureValue, session: URLSession(configuration: config))
     }
 
     /// Only accept the `wants` token parameter, like servers that reject the other one.
@@ -71,6 +72,76 @@ final class StubProtocol: URLProtocol {
         _ = try await llm.chat(system: "sys", text: "again", image: nil, maxTokens: 600, temperature: 0)
         let flags = StubProtocol.seen.map { [$0["max_tokens"] != nil, $0["max_completion_tokens"] != nil] }
         XCTAssertEqual(flags, [[true, false], [false, true], [false, true]])
+    }
+
+    func testCorrectsTokenAndTemperatureParametersAndRemembers() async throws {
+        StubProtocol.seen = []
+        StubProtocol.respond = { body in
+            if body["max_completion_tokens"] == nil {
+                return (400, "application/json", #"{"error":{"message":"Use max_completion_tokens"}}"#)
+            }
+            if body["temperature"] != nil {
+                return (400, "application/json", #"{"error":{"message":"Only the default is supported","param":"temperature","code":"unsupported_value"}}"#)
+            }
+            return (200, "application/json", #"{"choices":[{"message":{"content":"OK"}}]}"#)
+        }
+        let llm = client("test-model")
+        let reply = try await llm.chat(system:"sys", text:"ping", image:nil, maxTokens:600, temperature:0)
+        XCTAssertEqual(reply.text, "OK")
+        _ = try await llm.chat(system:"sys", text:"again", image:nil, maxTokens:600, temperature:0)
+        XCTAssertEqual(StubProtocol.seen.count, 4)
+        XCTAssertNil(StubProtocol.seen[3]["temperature"])
+        XCTAssertNotNil(StubProtocol.seen[3]["max_completion_tokens"])
+    }
+
+    func testDoesNotRetryUnrelatedBadRequest() async {
+        StubProtocol.seen = []
+        StubProtocol.respond = { _ in
+            (400, "application/json", #"{"error":{"message":"Unsupported value","param":"model","code":"unsupported_value"}}"#)
+        }
+        do {
+            _ = try await client("test-model").chat(system:"sys", text:"ping", image:nil, maxTokens:600, temperature:0)
+            XCTFail("expected error")
+        } catch { XCTAssertEqual(StubProtocol.seen.count, 1) }
+    }
+
+    func testTemperatureOmitAndCustomOverrideExtraBody() async throws {
+        fakeServer(wants:"max_tokens")
+        _ = try await client("test", extra:["temperature":0.7], temperatureMode:.omit)
+            .chat(system:"sys", text:"hi", image:nil, maxTokens:600, temperature:0)
+        XCTAssertNil(StubProtocol.seen[0]["temperature"])
+        fakeServer(wants:"max_tokens")
+        _ = try await client("test", extra:["temperature":0.7], temperatureMode:.custom, temperatureValue:1.25)
+            .chat(system:"sys", text:"hi", image:nil, maxTokens:600, temperature:0)
+        XCTAssertEqual(StubProtocol.seen[0]["temperature"] as? Double, 1.25)
+    }
+
+    func testCustomTemperatureIsNeverSilentlyChanged() async {
+        StubProtocol.seen = []
+        StubProtocol.respond = { _ in
+            (400, "application/json", #"{"error":{"param":"temperature","code":"unsupported_value"}}"#)
+        }
+        do {
+            _ = try await client("test", temperatureMode:.custom, temperatureValue:0.3)
+                .chat(system:"sys", text:"hi", image:nil, maxTokens:600, temperature:0)
+            XCTFail("expected error")
+        } catch {
+            XCTAssertEqual(StubProtocol.seen.count, 1)
+            XCTAssertEqual(StubProtocol.seen[0]["temperature"] as? Double, 0.3)
+        }
+    }
+
+    func testTemperatureSettingsPersist() {
+        let name = UUID().uuidString
+        let defaults = UserDefaults(suiteName:name)!
+        defer { defaults.removePersistentDomain(forName:name) }
+        let settings = Settings(defaults:defaults, info:nil)
+        XCTAssertEqual(settings.temperatureMode, .automatic)
+        settings.temperatureMode = .custom
+        settings.temperatureValue = 0.25
+        let restored = Settings(defaults:defaults, info:nil)
+        XCTAssertEqual(restored.temperatureMode, .custom)
+        XCTAssertEqual(restored.temperatureValue, 0.25)
     }
 
     func testExplicitTokenParamIsUsedDirectly() async throws {
@@ -121,8 +192,24 @@ final class StubProtocol: URLProtocol {
         XCTAssertEqual(StubProtocol.seen.count, 2)
         XCTAssertEqual(reply.text, "DO: wait")
         XCTAssertTrue(reply.retried)
+        XCTAssertEqual(StubProtocol.seen[1]["max_tokens"] as? Int, 2400)
         XCTAssertEqual(reply.finishReason, "stop")
         XCTAssertEqual(reply.usage["completion_tokens"], 9)
+    }
+
+    func testRepeatedEmptyReasoningIsNotReportedAsSuccess() async {
+        StubProtocol.seen = []
+        StubProtocol.respond = { _ in
+            (200,"application/json",#"{"choices":[{"message":{"content":"","reasoning_content":"thinking"},"finish_reason":"length"}]}"#)
+        }
+        do {
+            _ = try await client("reasoner").chat(system:"sys",text:"hi",image:nil,maxTokens:1000,temperature:0)
+            XCTFail("expected empty-content error")
+        } catch {
+            XCTAssertEqual(StubProtocol.seen.count,2)
+            XCTAssertEqual(StubProtocol.seen[1]["max_tokens"] as? Int,4000)
+            XCTAssertTrue(error.localizedDescription.contains("reasoning"))
+        }
     }
 
     func testHTTPErrorsAreThrown() async {

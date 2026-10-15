@@ -24,6 +24,52 @@ import XCTest
 
 /// Port of server/tests/test_device.py, with a fake BLE transport instead of a TCP socket.
 @MainActor final class DeviceTests: XCTestCase {
+    func testTextEntryChunksAndLineBreaksBeforeSending() async throws {
+        let device = FakeDevice()
+        let pointer = Pointer(device:device, calibrationFile:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let text = String(repeating:"x",count:400) + "\r\nend\t!"
+        try await pointer.type(text)
+        XCTAssertTrue(device.sent.allSatisfy { $0.utf8.count <= device.maxCommandBytes })
+        XCTAssertEqual(Array(device.sent.suffix(4)), ["key enter","type end","key tab","type !"])
+        XCTAssertEqual(device.sent.filter { $0.hasPrefix("type ") }.prefix(3).map { String($0.dropFirst(5)) }.joined(), String(repeating:"x",count:400))
+    }
+
+    func testUnicodeUsesOnePasteAndKeyboardRejectsWithoutPartialInput() async throws {
+        let device = FakeDevice()
+        let pointer = Pointer(device:device, calibrationFile:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        var pasted: [String] = []
+        pointer.pasteText = { pasted.append($0) }
+        try await pointer.type("hello 世界🙂")
+        XCTAssertEqual(pasted,["hello 世界🙂"])
+        XCTAssertTrue(device.sent.isEmpty)
+        pointer.textEntryMode = { .keyboard }
+        do { try await pointer.type("abc中文"); XCTFail("expected rejection") } catch {}
+        XCTAssertTrue(device.sent.isEmpty)
+        XCTAssertThrowsError(try TextEntryPlan.make("abc\u{0}def", mode:.automatic, limit:160))
+    }
+
+    func testModelShortcutNamesAreNormalizedWithoutChangingLiteralKeys() async throws {
+        let device = FakeDevice()
+        let pointer = Pointer(device:device, calibrationFile:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        try await pointer.key("CMD+V")
+        try await pointer.key("Command + A")
+        try await pointer.key("Return")
+        try await pointer.key("A")
+        XCTAssertEqual(device.sent,["key cmd+v","key cmd+a","key enter","key A"])
+        XCTAssertThrowsError(try KeyCombo.normalize("cmd+v\nclick"))
+    }
+
+    func testClipboardModeAlsoPastesASCIIExactlyOnce() async throws {
+        let device = FakeDevice()
+        let pointer = Pointer(device:device, calibrationFile:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        pointer.textEntryMode = { .clipboard }
+        var count = 0
+        pointer.pasteText = { value in XCTAssertEqual(value,"hello"); count += 1 }
+        try await pointer.type("hello")
+        XCTAssertEqual(count,1)
+        XCTAssertTrue(device.sent.isEmpty)
+    }
+
     func testTimeoutGrowsWithMoveDistanceAndTextLength() {
         XCTAssertEqual(CommandChannel.timeout("click"), 5)
         XCTAssertGreaterThan(CommandChannel.timeout("move 1000 -20"), CommandChannel.timeout("move 10 10"))
@@ -83,6 +129,16 @@ import XCTest
         XCTAssertTrue(board.lines[0].hasSuffix(" snap"))
         XCTAssertTrue(board.lines[1].contains(" task "))
         _ = await snap.value
+    }
+
+    func testTypingTimeoutDoesNotDuplicateText() async {
+        let board = FakeBoard(); board.silent = true
+        let channel = CommandChannel(transport:board); board.channel = channel
+        var recovered = false
+        channel.onTimeout = { _ in recovered = true }
+        do { _ = try await channel.send("type x"); XCTFail("expected timeout") } catch {}
+        XCTAssertTrue(recovered)
+        XCTAssertEqual(board.lines.count,1)
     }
 
     func testLinkDownFailsCommandsInFlight() async {

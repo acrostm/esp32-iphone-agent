@@ -16,6 +16,15 @@ import UIKit
     @Published var plannerModel: String { didSet { defaults.set(plannerModel, forKey: "plannerModel") } }  // "" = model
     @Published var actorModel: String { didSet { defaults.set(actorModel, forKey: "actorModel") } }        // "" = model
     @Published var tokenParam: String { didSet { defaults.set(tokenParam, forKey: "tokenParam") } }        // auto | ...
+    @Published var textEntryMode: TextEntryMode {
+        didSet { defaults.set(textEntryMode.rawValue, forKey:"textEntryMode") }
+    }
+    @Published var temperatureMode: TemperatureMode {
+        didSet { defaults.set(temperatureMode.rawValue, forKey: "temperatureMode") }
+    }
+    @Published var temperatureValue: Double {
+        didSet { defaults.set(temperatureValue, forKey: "temperatureValue") }
+    }
     @Published var extraBody: String { didSet { defaults.set(extraBody, forKey: "extraBody") } }          // JSON object
     @Published var apiKey: String { didSet { Keychain.set(apiKey, for: "llm-api-key"); DebugLog.redact([apiKey])
         if apiKey != oldValue { modelsChanged() } } }
@@ -50,6 +59,9 @@ import UIKit
         plannerModel = defaults.string(forKey: "plannerModel") ?? ""
         actorModel = defaults.string(forKey: "actorModel") ?? ""
         tokenParam = defaults.string(forKey: "tokenParam") ?? "auto"
+        textEntryMode = TextEntryMode(rawValue:defaults.string(forKey:"textEntryMode") ?? "") ?? .automatic
+        temperatureMode = TemperatureMode(rawValue: defaults.string(forKey: "temperatureMode") ?? "") ?? .automatic
+        temperatureValue = (defaults.object(forKey: "temperatureValue") as? Double) ?? 0
         extraBody = defaults.string(forKey: "extraBody") ?? "{}"
         apiKey = Self.stored(Keychain.get("llm-api-key")) ?? preset("IAPresetKey") ?? ""
         agentName = defaults.string(forKey: Self.agentNameKey) ?? Self.defaultAgentName
@@ -115,8 +127,12 @@ import UIKit
     /// role "planner" or "actor": its own model if set, else the shared one.
     func client(_ role: String) async throws -> LLMClient {
         let own = role == "planner" ? plannerModel : actorModel
+        guard temperatureMode != .custom || temperatureValue.isFinite else {
+            throw LLMError(message: "Temperature must be a finite number.")
+        }
         return LLMClient(baseURL: baseURL, model: own.isEmpty ? try await resolvedModel() : own, apiKey: apiKey,
-                         extra: extra, tokenParam: tokenParam)
+                         extra: extra, tokenParam: tokenParam,
+                         temperatureMode: temperatureMode, temperatureValue: temperatureValue)
     }
 }
 
