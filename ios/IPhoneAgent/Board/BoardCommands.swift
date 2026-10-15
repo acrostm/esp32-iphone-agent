@@ -134,11 +134,21 @@ extension BoardTransport {
     /// BoardTimeout and keeps the connection; only a real CoreBluetooth disconnect fails as link lost.
     @discardableResult
     func send(_ command: String, timeout custom: Double?) async throws -> String {
+        try await send(command, timeout: custom, serialized: true)
+    }
+
+    /// Task status must remain deliverable while a long snapshot owns the HID FIFO.
+    /// The native board processes task updates independently of the video worker.
+    func sendTaskTelemetry(_ json: String) async throws {
+        _ = try await send("task " + json, timeout: 2, serialized: false)
+    }
+
+    private func send(_ command: String, timeout custom: Double?, serialized: Bool) async throws -> String {
         guard connected, let transport else { throw DeviceError(message: "board not connected") }
         let timeout = custom ?? Self.timeout(command)
         let name = String(command.split(separator: " ").first ?? "")
-        await lock.lock()
-        defer { lock.unlock() }
+        if serialized { await lock.lock() }
+        defer { if serialized { lock.unlock() } }
         let started = now()
         let id = nextID
         nextID += 1

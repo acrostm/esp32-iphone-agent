@@ -7,12 +7,14 @@ import XCTest
     var lines: [String] = []
     var drops = 0
     var silent = false
+    var holdSnap = false
     weak var channel: CommandChannel?
 
     func write(_ line: String) throws {
         lines.append(line)
         guard !silent else { return }
         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+        if holdSnap && parts[1] == "snap" { return }
         let reply = parts[1] == "bad" ? "\(parts[0]) err unknown command" : "\(parts[0]) ok"
         Task { @MainActor in self.channel?.handleReply(reply) }
     }
@@ -69,6 +71,20 @@ import XCTest
         XCTAssertEqual(board.lines.count, 2)
     }
 
+    func testTaskTelemetryDoesNotWaitForSnapshotFIFO() async throws {
+        let board = FakeBoard()
+        board.holdSnap = true
+        let channel = CommandChannel(transport: board)
+        board.channel = channel
+        let snap = Task { try? await channel.send("snap", timeout: 0.2) }
+        while board.lines.isEmpty { await Task.yield() }
+        try await channel.sendTaskTelemetry(#"{"phase":"failed","action":"error"}"#)
+        XCTAssertEqual(board.lines.count, 2)
+        XCTAssertTrue(board.lines[0].hasSuffix(" snap"))
+        XCTAssertTrue(board.lines[1].contains(" task "))
+        _ = await snap.value
+    }
+
     func testLinkDownFailsCommandsInFlight() async {
         let board = FakeBoard()
         board.silent = true
@@ -99,6 +115,21 @@ import XCTest
         XCTAssertEqual(s.ap, "streaming")
         XCTAssertEqual(s.ble?.mtu, 247)
         XCTAssertEqual(s.fps, 4.8)
+    }
+
+    func testNativeVideoDiagnosticsSurviveShortHeartbeat() throws {
+        let full = try XCTUnwrap(BoardStatus.decode(Data(#"{"ui":1,"vcfg":30,"vaus":12,"vwait":0,"vdrop":2,"ap":"streaming"}"#.utf8)))
+        let short = try XCTUnwrap(BoardStatus.decode(Data(#"{"up":2000,"ap":"connected"}"#.utf8)))
+        let merged = full.merged(with: short)
+        XCTAssertEqual(merged.ui, 1)
+        XCTAssertEqual(merged.vcfg, 30)
+        XCTAssertEqual(merged.vaus, 12)
+        XCTAssertEqual(merged.vwait, 0)
+        XCTAssertEqual(merged.vdrop, 2)
+        XCTAssertEqual(merged.ap, "connected")
+        let reset = try XCTUnwrap(BoardStatus.decode(Data(#"{"vcfg":0,"vaus":0,"vwait":1,"vdrop":0}"#.utf8)))
+        XCTAssertEqual(merged.merged(with: reset).vcfg, 0)
+        XCTAssertEqual(merged.merged(with: reset).vwait, 1)
     }
 
     func testPointerRehomesEveryTenGestures() async throws {

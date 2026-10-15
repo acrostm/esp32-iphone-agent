@@ -35,6 +35,8 @@ import Foundation
     private var chars: [CBUUID: CBCharacteristic] = [:]
     private var subscribed = Set<CBUUID>()
     private var netWaiters: [CheckedContinuation<NetConfig, Error>] = []
+    private var netReadTimeout: Task<Void, Never>?
+    private var netReadRetry: Task<Void, Never>?
     private static let pairedKey = "pairedBoard"
     private var statusReads: Task<Void, Never>?
     let mock: Bool  // demo data: no Bluetooth, every command answers ok (MockMode)
@@ -114,9 +116,28 @@ import Foundation
     func readNet() async throws -> NetConfig {
         guard let peripheral, let c = chars[BoardUUID.net] else { throw DeviceError(message: "board not connected") }
         return try await withCheckedThrowingContinuation { cont in
+            let first = netWaiters.isEmpty
             netWaiters.append(cont)
+            guard first else { return }  // one encrypted read/pairing prompt for all callers
+            lastError = ""
+            netReadTimeout = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                self.lastError = String(localized: "Wi-Fi details timed out. Keep the board nearby, accept Bluetooth pairing, then try again.")
+                self.finishNetRead(.failure(DeviceError(message: self.lastError)))
+            }
             peripheral.readValue(for: c)
         }
+    }
+
+    private func finishNetRead(_ result: Result<NetConfig, Error>) {
+        netReadTimeout?.cancel()
+        netReadTimeout = nil
+        netReadRetry?.cancel()
+        netReadRetry = nil
+        let waiters = netWaiters
+        netWaiters = []
+        waiters.forEach { $0.resume(with: result) }
     }
 
     func writeNet(_ config: NetConfig) throws {
@@ -208,7 +229,7 @@ import Foundation
             while !Task.isCancelled {
                 guard let self, self.connected, let p = self.peripheral, let c = self.chars[BoardUUID.status] else { return }
                 if tick % 5 == 0 { p.readValue(for: c) }
-                if now() - lastTick < 2 && now() - self.lastNotify > 5 {
+                if self.netWaiters.isEmpty && now() - lastTick < 2 && now() - self.lastNotify > 5 {
                     DebugLog.write(String(format: "BLE: no notification for %.0f s; dropping the link", now() - self.lastNotify))
                     return self.dropLink()
                 }
@@ -227,8 +248,8 @@ import Foundation
         chars = [:]
         subscribed = []
         commands.linkDown()
-        netWaiters.forEach { $0.resume(throwing: DeviceError(message: "board disconnected")) }
-        netWaiters = []
+        net = nil  // never show another board's cached hotspot credentials
+        finishNetRead(.failure(DeviceError(message: "board disconnected")))
         if was {
             log("board disconnected")
             onLinkDown?()
@@ -341,15 +362,32 @@ extension BoardLink: CBPeripheralDelegate {
         MainActor.assumeIsolated {
             lastNotify = now()
             if c.uuid == BoardUUID.net {
-                let waiters = netWaiters
-                netWaiters = []
+                // The protected read can race the iOS pairing dialog. Give SMP time
+                // to finish, bounded by the read's existing 30-second deadline.
+                if let error = error as NSError?, error.domain == CBATTErrorDomain,
+                   [CBATTError.Code.insufficientEncryption.rawValue,
+                    CBATTError.Code.insufficientAuthentication.rawValue,
+                    CBATTError.Code.insufficientEncryptionKeySize.rawValue].contains(error.code),
+                   !netWaiters.isEmpty {
+                    netReadRetry?.cancel()
+                    netReadRetry = Task { [weak self] in
+                        do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+                        guard let self, !Task.isCancelled, !self.netWaiters.isEmpty,
+                              self.peripheral?.identifier == p.identifier else { return }
+                        p.readValue(for: c)
+                    }
+                    return
+                }
                 if let error {
-                    waiters.forEach { $0.resume(throwing: error) }
+                    lastError = error.localizedDescription
+                    finishNetRead(.failure(error))
                 } else if let v = c.value, let config = try? JSONDecoder().decode(NetConfig.self, from: v) {
                     net = config
-                    waiters.forEach { $0.resume(returning: config) }
+                    lastError = ""
+                    finishNetRead(.success(config))
                 } else {
-                    waiters.forEach { $0.resume(throwing: DeviceError(message: "bad net config")) }
+                    lastError = "bad net config"
+                    finishNetRead(.failure(DeviceError(message: lastError)))
                 }
                 return
             }

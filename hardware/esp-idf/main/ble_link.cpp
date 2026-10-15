@@ -21,6 +21,7 @@ const ble_uuid128_t uuids[] = {UUID(0), UUID(1), UUID(2), UUID(3), UUID(4), UUID
 struct Peer {
   std::atomic<uint16_t> handle{BLE_HS_CONN_HANDLE_NONE};
   std::atomic<bool> sub[3]{};
+  std::atomic<bool> encrypted{false};
 };
 Peer peers[2];
 uint16_t handles[5];
@@ -32,6 +33,7 @@ std::mutex status_lock;
 std::string status_value = "{}";
 std::atomic<bool> status_pending{false};
 std::atomic<uint32_t> drops{0}, rdrops{0}, bytes{0};
+std::atomic<int> security_result{0}, disconnect_reason{0};
 struct Text {
   char data[512];
 };
@@ -70,24 +72,43 @@ int gap(ble_gap_event *e, void *) {
         if (p.handle == BLE_HS_CONN_HANDLE_NONE) {
           for (auto &s : p.sub)
             s = false;
+          p.encrypted = false;
           p.handle = e->connect.conn_handle;
           break;
         }
-      ble_gap_upd_params params = {};
-      params.itvl_min = 12;
-      params.itvl_max = 12;
-      params.supervision_timeout = 400;
-      ble_gap_update_params(e->connect.conn_handle, &params);
-      ble_gap_set_prefered_le_phy(e->connect.conn_handle, BLE_GAP_LE_PHY_2M_MASK,
-                                  BLE_GAP_LE_PHY_2M_MASK, 0);
-      ble_gap_set_data_len(e->connect.conn_handle, 251, 2120);
+      // A connected GATT link is not necessarily encrypted. Explicitly request SMP
+      // before iOS reads the protected hotspot characteristic. Leave PHY/parameter
+      // negotiation to the central so it does not compete with initial pairing.
+      const int rc = ble_gap_security_initiate(e->connect.conn_handle);
+      security_result = rc;
+      ESP_LOGI("ble", "security requested: %d", rc);
     }
     advertise();
     break;
+  case BLE_GAP_EVENT_ENC_CHANGE: {
+    security_result = e->enc_change.status;
+    ble_gap_conn_desc desc = {};
+    const bool encrypted = e->enc_change.status == 0 &&
+                           ble_gap_conn_find(e->enc_change.conn_handle, &desc) == 0 &&
+                           desc.sec_state.encrypted;
+    for (auto &p : peers)
+      if (p.handle == e->enc_change.conn_handle)
+        p.encrypted = encrypted;
+    ESP_LOGI("ble", "security complete: status=%d encrypted=%d", e->enc_change.status, encrypted);
+    if (encrypted) {
+      // Negotiate larger packets only after SMP has finished; fragmented 27-byte
+      // link-layer packets cannot keep up with the mirrored video over a long GOP.
+      const int rc = ble_gap_set_data_len(e->enc_change.conn_handle, 251, 2120);
+      ESP_LOGI("ble", "post-pair data length request: %d", rc);
+    }
+    break;
+  }
   case BLE_GAP_EVENT_DISCONNECT:
+    disconnect_reason = e->disconnect.reason;
     for (auto &p : peers)
       if (p.handle == e->disconnect.conn.conn_handle) {
         p.handle = BLE_HS_CONN_HANDLE_NONE;
+        p.encrypted = false;
         for (auto &s : p.sub)
           s = false;
       }
@@ -219,6 +240,7 @@ void ble_begin(const std::string &name) {
   ble_hs_cfg.sync_cb = host_sync;
   ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
   ble_hs_cfg.sm_bonding = 1;
+  ble_hs_cfg.sm_mitm = 0; // Just Works: no display passkey / keyboard requirement
   ble_hs_cfg.sm_sc = 1;
   ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
   ble_hs_cfg.sm_their_key_dist = ble_hs_cfg.sm_our_key_dist;
@@ -326,3 +348,12 @@ void ble_unpair() {
     if (p.handle != BLE_HS_CONN_HANDLE_NONE)
       ble_gap_terminate(p.handle, BLE_ERR_REM_USER_CONN_TERM);
 }
+
+int ble_encrypted_peers() {
+  int n = 0;
+  for (auto &p : peers)
+    n += p.handle != BLE_HS_CONN_HANDLE_NONE && p.encrypted;
+  return n;
+}
+int ble_security_result() { return security_result; }
+int ble_disconnect_reason() { return disconnect_reason; }

@@ -18,7 +18,11 @@ into this repository. C AirPlay/bplist/GOP code is shared with upstream without
 compiling its Arduino wrappers; GPL notices and licensing still apply.
 
 The UI shows USB, BLE, Wi-Fi, AirPlay, IP, battery and uptime. A changes pages;
-B changes brightness. Details show video rate and memory. Credentials and phone
+B changes brightness. The three pages cover connection state, task progress and diagnostics.
+The task page shows phase, step, action, duration and the latest four operation
+records. A new task or terminal result selects this page automatically. Results
+remain visible after completion; missing task heartbeats for 15 seconds show
+`STATUS LOST` instead of implying that execution is still healthy. Details show video rate and memory. Credentials and phone
 screen content are never displayed. Display calls run on the UI task; commands
 and video run on workers. Video yields between batches and reserves BLE buffers
 for control messages. Initialization calls execute even when assertions are disabled.
@@ -85,15 +89,71 @@ Connect the board to the phone's data port, select `ESP32 Agent XXXX` over BLE,
 join `ESP32Agent-XXXX` with credentials read by the app over encrypted BLE, enable
 screen mirroring to **ESP32 Agent**, and enable AssistiveTouch and calibrate.
 Keep cellular Internet available for the model API while on the board's hotspot.
-See the upstream README for the full app workflow. Phone pairing, actual video
-throughput and complete agent task execution still need acceptance testing.
+For firmware diagnostics, connect the board to the Mac. For actual HID task
+execution, move the board USB cable to the iPhone; a USB connection only to the
+Mac cannot control the phone. Reconnect the unlocked phone to the Mac afterward
+to retrieve saved App logs. Do not interrupt a running task just to retrieve logs.
+See the upstream README for the full app workflow. Acceptance below covers this
+StopWatch model; other ESP32-S3 displays require their own board profile and tests.
+
+### Paired over Bluetooth but Wi-Fi does not connect
+
+Bluetooth pairing and Wi-Fi association are separate steps. Once BLE is ready,
+the app starts an encrypted read of the board's hotspot details. A single read is
+shared by concurrent callers and times out after 30 seconds instead of waiting
+forever; the 5-second notification watchdog does not interrupt that pairing read.
+Open **Settings → Board → Wi-Fi** to see the network, password, copy action and
+any connection error. The manual credentials are displayed as soon as they are
+read, including when iOS cancels or never completes automatic joining.
+
+A build without the Hotspot Configuration entitlement cannot join automatically.
+Copy the password into iOS Settings → Wi-Fi, join the matching `ESP32Agent-XXXX`,
+then return to the app and enable screen mirroring. A failed encrypted credential
+read is a Bluetooth/pairing issue, not proof of a wrong Wi-Fi password. Retrying
+shows the actual read error or timeout. Never publish the hotspot password in logs.
+
+### Video readiness and task feedback
+
+Task startup waits in the foreground for an actual decoded video frame before
+sending the phone Home. A checked Screen Mirroring entry alone does not prove
+video readiness. The native `status` response includes `ui:1` (task display
+protocol), `vcfg` (codec configuration bytes), `vaus` (buffered access units),
+`vwait` (waiting for a keyframe) and `vdrop` (GOP overflows). `diag` returns a
+bounded list of protocol events without image payloads or credentials. Native
+`snap` failures distinguish missing configuration, missing keyframes and missing
+frames. Reconnect Screen Mirroring after a board restart.
+
+During continuous streaming, already-delivered access units are reclaimed before
+history fills the fixed PSRAM buffer. Unsent dependencies remain intact. Once the
+cached IDR has been reclaimed, a separate whole-GOP snapshot cannot be replayed;
+`snap` reports this explicitly instead of sending undecodable P-frames. A new
+stream after that point requires a fresh keyframe/mirror session. This protects
+an uninterrupted stream; it does not manufacture keyframes after packet loss.
+Task status uses an independent request path, so a long snapshot cannot hold
+terminal updates behind the HID FIFO. Startup tolerates a brief BLE reconnect,
+and stream mode waits for a frame captured after Home rather than forcing a
+whole-GOP snapshot. Startup failures are shown directly on the App Home screen.
+
+The native-only `task <json>` command accepts bounded `phase`, `action`, `step`,
+`ms`, `elapsed`, `code` and `reset` fields. The app sends normalized action names
+and a two-second heartbeat, without prompts or typed text. Existing boards that
+do not advertise `ui:1` receive no task display commands. Live Activity feedback
+is also maintained on the phone. See the measured acceptance scope below.
 
 Build: PASS (ESP-IDF 5.5.3, Apple Silicon)
 
-Host tests: PASS (request parsing, screen state/timing, shared C tests, 14 packaging/dependency tests)
+Host tests: PASS (request parsing, task state/timing and stale heartbeats, shared C
+protocols, 10,000-frame cache reclamation, 14 packaging/dependency tests)
 
-Device tests: PASS for this firmware: flash hashes, USB ping/status, and
-user-confirmed display, A/B buttons and advancing uptime.
+Device tests: PASS for the tested StopWatch on 2026-10-16: flash hashes, USB
+ping/status, user-confirmed display, A/B buttons and uptime, encrypted BLE
+credential read, hotspot connection, AirPlay reception and App decoding
+(718 × 1560 observed). The user confirmed the task “return Home, then finish”
+completed successfully and the board displayed `done`. This is a basic task
+regression, not a long-duration or arbitrary-task certification.
 
-Unverified: BLE pairing, AirPlay, HID
-calibration, battery readings, power consumption, suspend/wake and sustained agent tasks.
+Unverified: automatic hotspot joining with a paid signing profile, other screen
+models, battery readings, power consumption, suspend/wake and sustained or complex
+agent tasks. Free Personal Team automatic joining remains unsupported by the
+current signing configuration; manual joining is a temporary fallback, not the
+completed automatic-networking feature.

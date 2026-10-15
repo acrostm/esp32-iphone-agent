@@ -59,11 +59,13 @@ static void handle_codec(const uint8_t *p, size_t n) {
   static const uint8_t sc[4] = {0, 0, 0, 1};
   uint8_t cfg[GOP_CFG_MAX];
   if (n >= 8 && !memcmp(p + 4, "hvc1", 4)) { ap_log("mirror: H.265 stream not supported"); return; }
-  if (n < 11) return;
+  ap_log("mirror: codec n=%u head=%02x%02x%02x%02x %02x%02x%02x%02x",(unsigned)n,
+         n>0?p[0]:0,n>1?p[1]:0,n>2?p[2]:0,n>3?p[3]:0,n>4?p[4]:0,n>5?p[5]:0,n>6?p[6]:0,n>7?p[7]:0);
+  if (n < 11) { ap_log("mirror: codec too short"); return; }
   size_t sps = p[6] << 8 | p[7];
-  if (8 + sps + 3 > n) return;
+  if (8 + sps + 3 > n) { ap_log("mirror: invalid SPS length %u",(unsigned)sps); return; }
   size_t pps = p[sps + 9] << 8 | p[sps + 10];
-  if (11 + sps + pps > n || 8 + sps + pps > sizeof cfg) return;
+  if (11 + sps + pps > n || 8 + sps + pps > sizeof cfg) { ap_log("mirror: invalid PPS length %u",(unsigned)pps); return; }
   memcpy(cfg, sc, 4);
   memcpy(cfg + 4, p + 8, sps);
   memcpy(cfg + 4 + sps, sc, 4);

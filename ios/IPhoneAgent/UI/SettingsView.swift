@@ -131,7 +131,13 @@ struct BoardSettingsView: View {
                 }
                 .disabled(app.join.busy)
                 if let ssid = app.hotspotSSID { ValueRow(title: "Network", value: ssid) }
-                if let net = app.manualHotspot, let pass = net.pass {
+                if case .failed(let reason) = app.join {
+                    Text(verbatim: reason).foregroundStyle(Palette.warning)
+                }
+                if !board.lastError.isEmpty {
+                    Text(verbatim: board.lastError).foregroundStyle(Palette.warning)
+                }
+                if let net = app.manualHotspot ?? board.net, net.mode == "ap", let pass = net.pass {
                     if let ssid = net.ssid { ValueRow(title: "Network", value: ssid) }
                     ValueRow(title: "Password", value: pass)
                     Button { UIPasteboard.general.string = pass; Haptics.success() } label: { Text("Copy Wi-Fi Password") }

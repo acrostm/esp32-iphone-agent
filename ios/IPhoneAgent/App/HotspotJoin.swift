@@ -30,12 +30,19 @@ extension AppModel {
         join = .joining
         let net: NetConfig
         do { net = try await board.readNet() } catch {
+            guard !Task.isCancelled else { return }
             say("hotspot: could not read the board's Wi-Fi: \(error.localizedDescription)")
-            join = .failed(String(localized: "Couldn't read the board's Wi-Fi. Is the board connected?"))
+            join = .failed(error.localizedDescription)
             return
         }
         guard !Task.isCancelled else { return }
-        let ssid = net.ssid ?? "?"
+        guard net.mode == "ap", let ssid = net.ssid, !ssid.isEmpty,
+              let pass = net.pass, !pass.isEmpty else {
+            join = .failed(String(localized: "The board did not provide hotspot credentials. Reconnect the board and try again."))
+            return
+        }
+        manualHotspot = net  // show credentials before asking iOS to join, including cancelled prompts
+
         if await onBoardWiFi(ssid) {  // already there: iOS would show no prompt
             say("hotspot: already on \(ssid)")
             return joined(ssid)
