@@ -1,6 +1,7 @@
 // Mirrored H.264 from AirPlay to BLE, see video_link.h.
 #include "video_link.hpp"
 #include "ble_link.hpp"
+#include "stream_cursor.hpp"
 #include "src/video/gop.h"
 #include <esp_heap_caps.h>
 
@@ -19,6 +20,7 @@ struct Req {
 
 static gop_buf gop;
 static bool replayable = true;
+static video::StreamCursor streamCursor;
 static SemaphoreHandle_t lock;
 static uint8_t *scratch;
 static QueueHandle_t reqs;
@@ -74,6 +76,7 @@ static std::string doSnap() {
   static uint8_t cfg[GOP_CFG_MAX];
   if (!ble_video_room())
     return "err video not subscribed";
+  if (streaming) return "err pause stream before snapshot";
   for (int attempt = 0; attempt < 3; attempt++) {
     uint32_t gen, cfg_ts;
     size_t cfg_len;
@@ -84,18 +87,25 @@ static std::string doSnap() {
              : v.waiting_idr     ? "err waiting for video keyframe"
                                  : "err video replay unavailable";
     }
-    if (!sendAu(cfg, cfg_len, VF_CONFIG | VF_SNAP, cfg_ts))
+    if (!sendAu(cfg, cfg_len, VF_CONFIG | VF_SNAP, cfg_ts)) {
+      streamCursor.invalidate();
       return "err ble send failed";
+    }
     bool complete = true;
     for (int i = 0; i < n && complete; i++) {
       gop_au au;
       complete = copyAu(gen, i, &au);
-      if (complete && !sendAu(scratch, au.len, VF_SNAP | (au.idr ? VF_IDR : 0), au.ts))
+      if (complete && !sendAu(scratch, au.len, VF_SNAP | (au.idr ? VF_IDR : 0), au.ts)) {
+        streamCursor.invalidate();
         return "err ble send failed";
+      }
     }
-    if (complete)
-      return "ok"; // else a new IDR replaced the GOP mid-send: start over with it
+    if (complete) {
+      streamCursor.replayed(gen, n); // the decoder has already consumed these units
+      return "ok";
+    } // else a new IDR replaced the GOP mid-send: start over with it
   }
+  streamCursor.invalidate();
   return "err video changing too fast";
 }
 
@@ -123,25 +133,26 @@ static std::string doBench(uint32_t kb) {
 // (P-frames can't be skipped: each needs the one before, and the next IDR may be minutes away).
 // After a failed send, start over from the GOP's IDR.
 static void streamStep() {
-  static uint32_t txGen = UINT32_MAX;
-  static int next;
+  auto &cursor = streamCursor;
+  auto &txGen = cursor.generation;
+  auto &next = cursor.next;
   static uint8_t cfg[GOP_CFG_MAX];
-  if (!streaming || !ble_video_room()) {
-    txGen = UINT32_MAX; // resend config + whole GOP when streaming resumes
+  if (!ble_video_room()) {
+    cursor.invalidate();
     return;
   }
+  if (!streaming) return; // preserve the decoder cursor across run/pause boundaries
   uint32_t gen, cfg_ts;
   size_t cfg_len;
   int n;
   if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts, true))
     return;
-  if (gen != txGen) {
-    xSemaphoreTake(lock, portMAX_DELAY);
-    const bool canReplay = replayable;
-    xSemaphoreGive(lock);
-    if (!canReplay) return; // a new decoder must wait for an independently decodable GOP
-    txGen = gen;
-    next = 0;
+  xSemaphoreTake(lock, portMAX_DELAY);
+  const bool canReplay = replayable;
+  xSemaphoreGive(lock);
+  const auto step = cursor.prepare(true, true, gen, canReplay);
+  if (step == video::StreamCursor::Step::wait_keyframe) return;
+  if (step == video::StreamCursor::Step::config) {
     if (!sendAu(cfg, cfg_len, VF_CONFIG, cfg_ts)) {
       txGen = UINT32_MAX;
       return;
@@ -272,7 +283,7 @@ VideoStats video_stats() {
   xSemaphoreTake(lock, portMAX_DELAY);
   uint32_t gopBytes = gop.used, configBytes = gop.cfg_len, frames = gop.n,
            overflows = gop.overflows;
-  bool waiting = gop.wait_idr;
+  bool waiting = gop.wait_idr, replay = replayable;
   xSemaphoreGive(lock);
   return {fresh ? statKbps.load() : 0,
           statIdrMs.load(),
@@ -281,5 +292,5 @@ VideoStats video_stats() {
           configBytes,
           frames,
           overflows,
-          waiting};
+          waiting, replay, streaming.load()};
 }

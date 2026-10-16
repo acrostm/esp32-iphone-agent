@@ -3,6 +3,13 @@ import XCTest
 
 /// Port of server/tests/test_agent.py.
 @MainActor final class AgentTests: XCTestCase {
+    func testPasteAliasAndJSONQuotedUnicodeAreModelIndependent() throws {
+        let actions = try Actions.parseActions("THINK: text is focused\n" + #"DO: paste "hello 世界\nnext""#)
+        XCTAssertEqual(actions[0]["action"], .str("type"))
+        XCTAssertEqual(actions[0]["text"], .str("hello 世界\nnext"))
+        XCTAssertEqual(try Actions.parseCommand(#"type "\"hello\"""#)["text"], .str("\"hello\""))
+    }
+
     func testParseSingleAction() throws {
         let acts = try Actions.parseActions("THINK: The Search pill is visible, so I tap it.\nDO: tap 500 814")
         XCTAssertEqual(acts, [["thought": .str("The Search pill is visible, so I tap it."), "thought_zh": .str(""),
@@ -115,6 +122,19 @@ import XCTest
         await agent.run()
         XCTAssertEqual(agent.steps.last?["action"], .str("fail"))
         XCTAssertEqual(agent.steps.last?["reason"], .str("3 errors in a row"))
+    }
+
+    func testRepeatedRunsDoNotRetainTerminalState() async throws {
+        let model = FakeModel { n in n % 2 == 1 ? "1. finish" : "THINK: finished\nDO: done ok" }
+        let agent = AgentLoop(phone:FakeGestures(), screen:FakeScreen(), actor:model, planner:model, trace:nil)
+        for run in 0..<20 {
+            try agent.start("run \(run)")
+            let deadline = now() + 2
+            while agent.running && now() < deadline { await Task.yield() }
+            XCTAssertFalse(agent.running)
+            XCTAssertEqual(agent.steps.last?["action"],.str("done"))
+            XCTAssertEqual(agent.steps.count,2)
+        }
     }
 
     func testRunFinishesOnDone() async {

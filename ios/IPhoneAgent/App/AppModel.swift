@@ -25,6 +25,7 @@ import UIKit
     let pointer: Pointer
     let agent: AgentLoop
     @Published private(set) var log: [LogLine] = []
+    @Published var modelError: String?
     @Published var modelOK: Bool?  // last LLM ping result
     @Published var hotspotSSID: String?
     @Published var otherWiFi: String?  // the phone is on this network, not the board's
@@ -81,6 +82,19 @@ import UIKit
         board.log = say
         board.commands.log = say
         pointer.log = say
+        pointer.textEntryMode = { [weak self] in self?.settings.textEntryMode ?? .automatic }
+        pointer.pasteText = { [weak self] text in
+            guard let self else { throw CancellationError() }
+            let pasteboard = UIPasteboard.general
+            let before = pasteboard.changeCount
+            pasteboard.setItems([["public.utf8-plain-text": text]], options:[.localOnly:true, .expirationDate:Date().addingTimeInterval(120)])
+            guard pasteboard.changeCount != before else {
+                throw LLMError(message:"iOS could not prepare the clipboard. Open ESP32 Agent and retry the input, or use Keyboard mode for ASCII text.")
+            }
+            try await Task.sleep(nanoseconds:100_000_000)
+            try await self.pointer.key("cmd+v")
+            DebugLog.write("text input: clipboard paste requested (\(text.utf8.count) bytes)")
+        }
         pointer.screenAspect = { DeviceScreen.aspect }
         pointer.locate = { [weak self] jpeg in await self?.locatePointer(jpeg) }
         DebugLog.relay = { [weak self] line in
@@ -170,6 +184,10 @@ import UIKit
     /// A command timed out: video may be starving the board's control traffic. Stop the stream and run
     /// snap-per-step for the rest of this run (the next run streams again).
     private func commandTimedOut(_ command: String) async {
+        if board.status?.ui != nil {
+            DebugLog.write("native command timeout: preserving the live video chain; no snapshot fallback")
+            return
+        }
         DebugLog.write("cmd timeout on '\(command.prefix(30))': stream off, snap-per-step for this run")
         FrameMode.fallback = .snap
         if feed.streamOn { _ = try? await feed.stream(false) }
@@ -178,7 +196,7 @@ import UIKit
     func setFrameMode(_ mode: FrameMode) {
         FrameMode.current = mode
         say("frame mode: \(mode.rawValue)")
-        if mode == .stream && agent.running { Task { try? await feed.stream(true) } }
+        if mode == .stream && (agent.running || (board.connected && board.status?.ui != nil)) { Task { try? await feed.stream(true) } }
         if mode == .snap && feed.streamOn { Task { try? await feed.stream(false) } }
     }
 
@@ -244,6 +262,8 @@ import UIKit
     }
 
     func pingLLM() async {
+        modelError = nil
+        modelOK = nil
         if MockMode.on {
             try? await Task.sleep(nanoseconds: 900_000_000)
             modelOK = true
@@ -259,6 +279,7 @@ import UIKit
             say(String(format: "LLM ok in %.0f ms: %@", metrics.llmPingMs ?? 0, String(r.text.prefix(40))))
         } catch {
             modelOK = false
+            modelError = error.localizedDescription
             say("LLM: \(error.localizedDescription)")
         }
     }
@@ -277,7 +298,7 @@ import UIKit
             catch { failed += 1 }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
-        try? await feed.stream(false)
+        if board.status?.ui == nil || FrameMode.current == .snap { try? await feed.stream(false) }
         decodedBefore = metrics.decodeErrors - decodedBefore
         say("background test: LLM \(ok) ok / \(failed) failed, decode errors \(decodedBefore), "
             + "suspensions \(metrics.suspensions), background alive \(Int(metrics.backgroundAlive)) s")
@@ -323,6 +344,9 @@ extension AppModel {
         }
     }
     func awaitInitialVideo() async throws {
+        if let s = board.status {
+            DebugLog.write("start video state: ap=\(s.ap ?? "-") cfg=\(s.vcfg ?? -1) frames=\(s.vaus ?? -1) wait=\(s.vwait ?? -1) replay=\(s.vreplay ?? -1) stream=\(s.vstream ?? -1)")
+        }
         taskDisplay("waiting",action:"video",code:"waiting_first_frame",reset:true)
         live.start(task:lastTask,runID:runID,limit:agent.maxSteps)
         live.update(mood:.listening,step:0,line:String(localized:"Waiting for a real screen frame…"),phase:.running)
@@ -330,7 +354,7 @@ extension AppModel {
         let deadline = now() + 30
         while now() < deadline {
             try Task.checkCancellation()
-            if feed.frame != nil && now() - feed.updated < 3 { return }
+            if feed.live && now() - feed.updated < 3 { return }
             if !board.connected { throw DeviceError(message:String(localized:"Board disconnected while waiting for video.")) }
             try await Task.sleep(nanoseconds: 250_000_000)
         }

@@ -21,10 +21,12 @@ enum Actions {
     /// One DO line, e.g. "tap 152 362" -> {"action": "tap", "x": 152, "y": 362}.
     static func parseCommand(_ line: String) throws -> JObject {
         let (head, rest) = partition(line.trimmingCharacters(in: .whitespacesAndNewlines))
-        let name = head.lowercased()
+        let name = head.lowercased() == "paste" ? "type" : head.lowercased()
         guard let keys = actions[name] else { throw ParseError(message: "unknown action: \(line.prefix(100))") }
         if let first = keys.first, textArgs.contains(first) {
-            let text = rest.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let raw = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = (try? JSONDecoder().decode(String.self, from:Data(raw.utf8)))
+                ?? (raw.hasPrefix("\"") && raw.hasSuffix("\"") && raw.count >= 2 ? String(raw.dropFirst().dropLast()) : raw)
             return ["action": .str(name), first: .str(text)]
         }
         let numbers = matches(#"-?\d+(?:\.\d+)?"#, in: rest).compactMap { Double($0) }.map { Int($0) }

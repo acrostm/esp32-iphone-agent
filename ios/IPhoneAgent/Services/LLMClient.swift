@@ -1,5 +1,9 @@
 import Foundation
 
+enum TemperatureMode: String, CaseIterable {
+    case automatic, omit, custom
+}
+
 struct ChatResult {
     var text: String
     var firstToken: Double?  // seconds until the first streamed token
@@ -45,17 +49,23 @@ struct LLMError: LocalizedError {
     private let apiKey: String
     private let extra: [String: Any]
     private(set) var tokenParam: String
+    private let temperatureMode: TemperatureMode
+    private let temperatureValue: Double
+    private var omitTemperature = false
     private var auto: Bool
     private let session: URLSession
 
     init(baseURL: String, model: String, apiKey: String = "", extra: [String: Any] = [:],
-         tokenParam: String = "auto", session: URLSession? = nil) {
+         tokenParam: String = "auto", temperatureMode: TemperatureMode = .automatic,
+         temperatureValue: Double = 0, session: URLSession? = nil) {
         var trimmed = baseURL
         while trimmed.hasSuffix("/") { trimmed.removeLast() }
         self.baseURL = URL(string: trimmed) ?? URL(string: "http://invalid")!
         self.model = model
         self.apiKey = apiKey
         self.extra = extra
+        self.temperatureMode = temperatureMode
+        self.temperatureValue = temperatureValue
         // "auto": send max_tokens; switch for good if the server asks for max_completion_tokens
         if Self.tokenParams.contains(tokenParam) { (self.tokenParam, auto) = (tokenParam, false) }
         else { (self.tokenParam, auto) = ("max_tokens", true) }
@@ -79,7 +89,14 @@ struct LLMError: LocalizedError {
         let first = try await once(system: system, text: text, images: images, maxTokens: maxTokens, temperature: temperature)
         guard first.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return first }
         DebugLog.write("llm: empty reply (finish \(first.finishReason ?? "-"), reasoning \(first.reasoningChars) chars); asking once more")
-        var again = try await once(system: system, text: text, images: images, maxTokens: maxTokens, temperature: temperature)
+        let reasoningExhausted = first.finishReason == "length" && first.reasoningChars > 0
+        let retryBudget = reasoningExhausted ? max(maxTokens, min(max(maxTokens, 1), 2048) * 4) : maxTokens
+        var again = try await once(system: system, text: text, images: images, maxTokens: retryBudget, temperature: temperature)
+        guard !again.text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else {
+            throw LLMError(message: reasoningExhausted
+                ? "The model used its token budget for reasoning and returned no answer. Lower reasoning effort or choose a faster vision model."
+                : "The model returned an empty answer twice; verify the model and response format.")
+        }
         again.retried = true
         again.total += first.total
         return again
@@ -93,6 +110,11 @@ struct LLMError: LocalizedError {
         content.append(["type": "text", "text": text])
         var body: [String: Any] = ["model": model, "temperature": temperature]
         extra.forEach { body[$0.key] = $0.value }
+        switch temperatureMode {
+        case .automatic: if omitTemperature { body.removeValue(forKey: "temperature") }
+        case .omit: body.removeValue(forKey: "temperature")
+        case .custom: body["temperature"] = temperatureValue
+        }
         body["messages"] = [["role": "system", "content": system], ["role": "user", "content": content]]
         body["stream"] = true
 
@@ -101,10 +123,18 @@ struct LLMError: LocalizedError {
         DebugLog.write("llm → \(model): \(images.count) image(s) \(kb) KB, \(text.count) chars")
         var status = 0, result: ChatResult?, errorText = ""
         do {
-            (status, result, errorText) = try await post(body, maxTokens: maxTokens, started: started)
-            if status == 400 && auto && errorText.contains("max_completion_tokens") {
-                (tokenParam, auto) = ("max_completion_tokens", false)
+            // At most one token-parameter correction and one temperature correction.
+            // React to explicit server errors rather than guessing from model names.
+            for attempt in 0..<3 {
                 (status, result, errorText) = try await post(body, maxTokens: maxTokens, started: started)
+                guard status == 400, attempt < 2 else { break }
+                if auto && errorText.contains("max_completion_tokens") {
+                    (tokenParam, auto) = ("max_completion_tokens", false)
+                } else if temperatureMode == .automatic && !omitTemperature && Self.rejectsTemperature(errorText) {
+                    omitTemperature = true
+                    body.removeValue(forKey: "temperature")
+                    DebugLog.write("llm: endpoint rejects temperature; retrying with its default")
+                } else { break }
             }
         } catch {
             DebugLog.write(String(format: "llm ✗ %@ after %.1f s: %@", model, now() - started, error.localizedDescription))
@@ -119,6 +149,14 @@ struct LLMError: LocalizedError {
                               result.firstToken.map { String(format: "%.1f s", $0) } ?? "-", result.total, result.text.count)
                        + " " + PyJSON.dumps(.obj(result.diagnostics)))
         return result
+    }
+
+    private static func rejectsTemperature(_ text: String) -> Bool {
+        guard let json = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+              let error = json["error"] as? [String: Any],
+              error["param"] as? String == "temperature",
+              let code = error["code"] as? String else { return false }
+        return code == "unsupported_value" || code == "unsupported_parameter"
     }
 
     /// The first model id from GET {base}/models.

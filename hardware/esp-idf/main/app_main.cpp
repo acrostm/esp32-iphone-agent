@@ -104,7 +104,7 @@ std::string statusJson(bool full) {
       s, sizeof s,
       "{\"up\":%lu,\"rst\":\"%s\",\"heap\":%u,\"psram\":%u,\"usb\":\"%s\",\"net\":\"%s\","
       "\"ip\":\"%s\",\"sta\":%d,"
-      "\"ui\":1,\"vcfg\":%u,\"vaus\":%u,\"vwait\":%u,\"vdrop\":%u,\"ap\":\"%s\",\"w\":%u,\"h\":%u,"
+      "\"ui\":1,\"vcfg\":%u,\"vaus\":%u,\"vwait\":%u,\"vdrop\":%u,\"vreplay\":%u,\"vstream\":%u,\"ap\":\"%s\",\"w\":%u,\"h\":%u,"
       "\"kbps\":%lu,\"fps\":%.1f,\"idr\":%lu,\"gop\":%lu,"
       "\"ble\":{\"mtu\":%u,\"phy\":%u,\"kbps\":%lu,\"drop\":%lu,\"rdrop\":%lu,\"n\":%d,"
       "\"enc\":%d,\"sec\":%d,\"disc\":%d}}",
@@ -112,7 +112,7 @@ std::string statusJson(bool full) {
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), usb_state(), net_mode(),
       net_ip().c_str(), net_peers(), (unsigned)v.config_bytes, (unsigned)v.frames,
-      (unsigned)v.waiting_idr, (unsigned)v.overflows, apStates[airplay_state()], cfg_width(),
+      (unsigned)v.waiting_idr, (unsigned)v.overflows, (unsigned)v.replayable, (unsigned)v.streaming, apStates[airplay_state()], cfg_width(),
       cfg_height(), (unsigned long)v.kbps, v.fps, (unsigned long)v.idr_ms,
       (unsigned long)v.gop_bytes, ble_mtu(), ble_phy(), (unsigned long)ble_kbps(),
       (unsigned long)ble_drops(), (unsigned long)ble_reply_drops(), ble_peers(),

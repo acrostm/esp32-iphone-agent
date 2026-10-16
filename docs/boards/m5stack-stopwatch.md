@@ -145,7 +145,7 @@ Build: PASS (ESP-IDF 5.5.3, Apple Silicon)
 Host tests: PASS (request parsing, task state/timing and stale heartbeats, shared C
 protocols, 10,000-frame cache reclamation, 14 packaging/dependency tests)
 
-Device tests: PASS for the tested StopWatch on 2026-10-16: flash hashes, USB
+Baseline device tests (before the repeated-run/text follow-up): PASS on 2026-10-16: flash hashes, USB
 ping/status, user-confirmed display, A/B buttons and uptime, encrypted BLE
 credential read, hotspot connection, AirPlay reception and App decoding
 (718 × 1560 observed). The user confirmed the task “return Home, then finish”
@@ -157,3 +157,44 @@ models, battery readings, power consumption, suspend/wake and sustained or compl
 agent tasks. Free Personal Team automatic joining remains unsupported by the
 current signing configuration; manual joining is a temporary fallback, not the
 completed automatic-networking feature.
+
+
+## Repeated runs and text input
+
+Task completion keeps continuous video running. Pause/resume preserves the native
+transmit cursor even after delivered history has been reclaimed; a paused snapshot
+hands its decoded position back to the stream. A new subscriber still requires an
+independently decodable keyframe. The `vreplay` and `vstream` status fields distinguish
+cached snapshot availability from the stream switch. Native live mode never falls
+back to replaying an old GOP into the active decoder. A stale/broken image can remain
+visible for review, but does not count as a healthy live screen.
+
+In **Settings → Model → Advanced → Text input**, choose Automatic, Keyboard (ASCII)
+or Clipboard. All models use the same entry path. ASCII text is split to the transport
+budget; line breaks and tabs use separate keyboard commands. Unicode uses the configured
+clipboard bridge; `paste TEXT` normalizes to the same action as `type TEXT`. The bridge
+writes a local-only clipboard item with a two-minute expiration and sends Cmd+V only
+after observing the clipboard change. It does not prove that the target field accepted
+the paste. iOS clipboard availability, paste permission and field focus still require
+physical-phone acceptance; failed clipboard preparation is reported rather than silently
+sending unsupported Unicode to the HID keyboard. Clipboard mode replaces the clipboard.
+A visible caret is sufficient focus evidence when a hardware keyboard hides the software
+keyboard. The next screenshot must confirm the intended text before submission.
+
+Typing/click/relative-move/key timeouts are not automatically replayed: their outcome
+may already have reached the phone. Native control timeouts preserve live mode instead
+of switching to a snapshot whose IDR might no longer exist.
+
+**Temperature** supports Automatic compatibility, Omit and Custom. Explicit Omit/Custom
+settings override Extra body JSON. Only Automatic removes temperature in response to an
+explicit unsupported-parameter/value error. Reasoning-only empty replies get one larger
+bounded retry budget; a second empty reply is an error, not a successful connection test.
+
+Validation for these follow-up changes: 86 App tests pass, including 20 consecutive
+in-memory runs, input chunking/Unicode routing, no duplicate text after timeout and
+snapshot/live isolation. The native cursor test covers 1,000 pause/resume transitions;
+shared C/sanitizer and package checks also pass. **Device tests for these follow-up
+changes: NOT RUN.** The connected board could be read, but its current USB application
+could not be switched remotely into ROM download mode; exclusive HID capture was denied
+by macOS. No test typing was sent to the Mac. Phone background clipboard behavior,
+repeated real tasks and the newly built firmware still need device acceptance.

@@ -16,6 +16,30 @@ final class VideoTests: XCTestCase {
     let idr: [UInt8] = [0, 0, 0, 1, 0x65, 9, 9]
     let p: [UInt8] = [0, 0, 0, 1, 0x41, 7]
 
+    @MainActor func testNativeLiveStreamNeverFallsBackToHistoricalSnapshot() async throws {
+        let device = FakeDevice()
+        let feed = VideoFeed()
+        let metrics = Metrics()
+        feed.device = device; feed.metrics = metrics; feed.mirroring = true
+        metrics.status(try XCTUnwrap(BoardStatus.decode(Data(#"{"ui":1,"vreplay":0}"#.utf8))))
+        try await feed.stream(true)
+        do { _ = try await feed.currentFrame(maxAge:0,wait:0); XCTFail("expected recovery") } catch {}
+        do { _ = try await feed.snap(); XCTFail("expected no interleaved snapshot") } catch {}
+        XCTAssertEqual(device.sent,["stream on"])
+    }
+
+    @MainActor func testMissingChunksMakeAnOldDisplayedFrameNotLive() throws {
+        let feed = VideoFeed()
+        let device = FakeDevice()
+        feed.device = device; feed.mirroring = true
+        feed.show(Data([1]),width:10,height:20)
+        XCTAssertTrue(feed.live)
+        feed.receive(Data([0,0,F.bench.rawValue]))
+        feed.receive(Data([3,0,F.bench.rawValue]))
+        XCTAssertFalse(feed.live)
+        XCTAssertNotNil(feed.frame) // retained for review, never considered a healthy stream
+    }
+
     func testInOrderChunksMakeAccessUnits() {
         var a = VideoAssembler()
         XCTAssertEqual(a.add(chunk(0, [.start, .end, .config], sps, ms: 1000))?.config, true)

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[3]
 NATIVE = ROOT / 'hardware/esp-idf/main'
 HERE = Path(__file__).resolve().parent
 with tempfile.TemporaryDirectory(prefix='stopwatch-tests-') as tmp:
-    for name in ('protocol', 'model', 'task'):
+    for name in ('protocol', 'model', 'task', 'stream'):
         target = str(Path(tmp) / name)
         subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
                         '-fsanitize=address,undefined', '-I' + str(NATIVE), str(HERE / f'test_{name}.cpp'),

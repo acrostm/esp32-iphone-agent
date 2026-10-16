@@ -45,6 +45,7 @@ extension ScreenSource {
     func fresh(since: Double, timeout: Double = 0.8) async -> Data? {
         let deadline = now() + timeout
         while (capturedAt > 0 ? capturedAt : updated) <= since {
+            if Task.isCancelled { return nil }
             if now() > deadline { return nil }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -85,7 +86,7 @@ extension ScreenSource {
         }
     }
 
-    var live: Bool { mirroring && frame != nil && (device?.connected ?? false) }
+    var live: Bool { mirroring && frame != nil && !broken && now() - updated < 10 && (device?.connected ?? false) }
 
     /// Frame width / height (portrait iPhone as a fallback).
     var aspect: Double { size.width > 0 && size.height > 0 ? size.width / size.height : 9 / 19.5 }
@@ -148,8 +149,11 @@ extension ScreenSource {
     @discardableResult
     func currentFrame(maxAge: Double = 1, wait: Double = 3) async throws -> String {
         if streamOn && mirroring {
-            if frame != nil && now() - updated < maxAge { return "live" }
-            if await fresh(since: now() - maxAge, timeout: wait) != nil { return "live (waited)" }
+            if frame != nil && !broken && now() - updated < maxAge { return "live" }
+            if await fresh(since: now() - maxAge, timeout: wait) != nil && !broken { return "live (waited)" }
+            if metrics?.board?.ui != nil {
+                throw BlindError(reason:"Live video is delayed or missing a keyframe. Reconnect Screen Mirroring; do not restart the board just to request a snapshot.")
+            }
         }
         do {
             try await snap()
@@ -164,6 +168,12 @@ extension ScreenSource {
     @discardableResult
     func snap(timeout: Double? = nil) async throws -> Double {
         guard let device else { throw DeviceError(message: "board not connected") }
+        if streamOn && metrics?.board?.ui != nil {
+            throw DeviceError(message:"Pause live video before requesting a separate snapshot.")
+        }
+        if metrics?.board?.vreplay == 0 {
+            throw BlindError(reason:"The old keyframe has been reclaimed. Reconnect Screen Mirroring for a new snapshot; a board reboot is unnecessary.")
+        }
         let started = now()
         if let channel = device as? CommandChannel {
             try await channel.send("snap", timeout: timeout ?? snapTimeout)
@@ -178,7 +188,8 @@ extension ScreenSource {
     }
 
     func stream(_ on: Bool) async throws {
-        try await device?.send("stream \(on ? "on" : "off")")
+        guard let device else { throw DeviceError(message:"board not connected") }
+        try await device.send("stream \(on ? "on" : "off")")
         streamOn = on
     }
 
@@ -199,6 +210,10 @@ extension ScreenSource {
                 await settled()
                 if await newer(than: since, timeout: 1.5) { return }
                 guard broken || !streamOn else { return DebugLog.write("frame: none after the action; screen unchanged") }
+                if metrics?.board?.ui != nil {
+                    DebugLog.write("frame: native stream needs recovery; skipping destructive GOP replay")
+                    return
+                }
                 DebugLog.write("frame: stream stale (waiting for an IDR); snapping")
                 try await snap()
             }
