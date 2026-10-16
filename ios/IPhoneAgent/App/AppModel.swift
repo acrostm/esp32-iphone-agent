@@ -40,6 +40,8 @@ import UIKit
     @Published var recovering: Recovery.Stage?  // the run is paused for a lost link (board, hotspot, mirroring)
     var recoverySince = Date()
     @Published var takingOver = false
+    @Published var startupError: String?
+    @Published var startingAgent = false
     @Published var departing = false  // the character's take-off before a run
     /// A banner on Home: the app could not leave by itself (swipe up), or the run waits while the app is in front.
     @Published var homeHint: String?
@@ -98,7 +100,8 @@ import UIKit
             guard let self else { return }
             feed.resetStream()
             metrics.mtu = board.mtu
-            if agent.running && !MockMode.on && FrameMode.current == .stream {  // the board forgot `stream on`: the paused run needs the screen back
+            startJoin(auto: true)  // pairing/connection must lead to Wi-Fi setup in Settings too
+            if !MockMode.on && FrameMode.current == .stream {  // prime the decoder before a task; long GOPs are expensive to fetch later
                 Task { [weak self] in
                     do { try await self?.feed.stream(true); DebugLog.write("recover: BLE back, stream on again") } catch {
                         DebugLog.write("recover: stream on after reconnect failed: \(error.localizedDescription)")
@@ -106,7 +109,15 @@ import UIKit
                 }
             }
         }
-        board.onLinkDown = { [weak self] in self?.feed.linkLost() }
+        board.onLinkDown = { [weak self] in
+            guard let self else { return }
+            feed.linkLost()
+            joinTask?.cancel()
+            joinTask = nil
+            join = .idle
+            manualHotspot = nil
+            hotspotSSID = nil
+        }
         board.commands.onTimeout = { [weak self] command in await self?.commandTimedOut(command) }
         DebugLog.write("frame mode: \(FrameMode.current.rawValue)")
         board.commands.onTiming = { [weak self] name, ms in self?.metrics.hidMs[name] = ms }
@@ -200,6 +211,17 @@ import UIKit
     /// The one-tap join of the board's Wi-Fi (state machine in HotspotJoin.swift).
     @Published var join = JoinState.idle
     var joinTask: Task<Void, Never>?
+    var displayTaskBegan = Date()
+    var displayActionAt = Date()
+    var displayDuration = 0
+    var displayPhase = "waiting"
+    var displayAction = "starting"
+    var displayCode = ""
+    var displayHeartbeat: Task<Void, Never>?
+    var displaySendTask: Task<Void, Never>?
+    var pendingTaskDisplay: String?
+    var pendingTaskReset = false
+
 
     /// Set when one-tap join failed: the user joins in Settings with the shown password.
     @Published var manualHotspot: NetConfig?
@@ -259,5 +281,61 @@ import UIKit
         decodedBefore = metrics.decodeErrors - decodedBefore
         say("background test: LLM \(ok) ok / \(failed) failed, decode errors \(decodedBefore), "
             + "suspensions \(metrics.suspensions), background alive \(Int(metrics.backgroundAlive)) s")
+    }
+}
+
+// Structured, bounded task telemetry; never send prompts, typed text or model secrets.
+extension AppModel {
+    func taskDisplay(_ phase: String, action: String, ms: Int = 0, code: String = "", reset: Bool = false) {
+        if reset { displayTaskBegan = Date(); displayHeartbeat?.cancel() }
+        displayPhase = phase; displayAction = action; displayCode = code; displayDuration = ms
+        if ["failed", "done", "stopped"].contains(phase) { displayHeartbeat?.cancel(); displayHeartbeat = nil }
+        sendTaskDisplay(ms: ms, reset: reset)
+        if reset {
+            displayHeartbeat = Task { [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
+                    guard let self, !Task.isCancelled else { return }
+                    self.sendTaskDisplay(ms: self.displayDuration, reset: false)
+                }
+            }
+        }
+    }
+    private func sendTaskDisplay(ms: Int, reset: Bool) {
+        guard board.connected, board.status?.ui == 1 else { return }
+        let allowed = ["starting","video","look","think","tap","swipe","path","circle","type","key","home","back","wait","done","error","stopped","plan","replan"]
+        pendingTaskReset = pendingTaskReset || reset
+        let payload: [String: Any] = ["phase": displayPhase, "action": allowed.contains(displayAction) ? displayAction : "wait",
+            "step": min(moveCount, 10000), "ms": max(0,min(ms,3600000)),
+            "elapsed": max(0,min(Int(Date().timeIntervalSince(displayTaskBegan)*1000),86400000)),
+            "code": displayCode, "reset": pendingTaskReset]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload), let text = String(data:data,encoding:.utf8) else { return }
+        pendingTaskDisplay = text
+        guard displaySendTask == nil else { return }
+        displaySendTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.displaySendTask = nil }
+            while let next = self.pendingTaskDisplay {
+                self.pendingTaskDisplay = nil
+                self.pendingTaskReset = false
+                try? await self.board.commands.sendTaskTelemetry(next)
+            }
+        }
+    }
+    func awaitInitialVideo() async throws {
+        taskDisplay("waiting",action:"video",code:"waiting_first_frame",reset:true)
+        live.start(task:lastTask,runID:runID,limit:agent.maxSteps)
+        live.update(mood:.listening,step:0,line:String(localized:"Waiting for a real screen frame…"),phase:.running)
+        try await feed.stream(true)
+        let deadline = now() + 30
+        while now() < deadline {
+            try Task.checkCancellation()
+            if feed.frame != nil && now() - feed.updated < 3 { return }
+            if !board.connected { throw DeviceError(message:String(localized:"Board disconnected while waiting for video.")) }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        let detail = board.status?.vcfg == 0 ? "video_config_missing" : (board.status?.vwait == 1 ? "waiting_keyframe" : "no_decoded_frame")
+        taskDisplay("failed",action:"error",code:detail)
+        throw DeviceError(message:String(localized:"Screen Mirroring is connected but no usable video frame arrived. See Board diagnostics."))
     }
 }

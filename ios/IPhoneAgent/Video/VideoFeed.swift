@@ -67,6 +67,7 @@ extension ScreenSource {
     var metrics: Metrics?
     weak var device: HIDDevice?
 
+    private var loggedFirstFrame = false
     private var assembler = VideoAssembler()
     private let decoder = H264Decoder()
 
@@ -75,7 +76,9 @@ extension ScreenSource {
         decoder.onError = { [weak self] msg in
             DispatchQueue.main.async {
                 let bg = UIApplication.shared.applicationState == .background
-                self?.note = bg ? "\(msg) [in background]" : msg
+                let detail = bg ? "\(msg) [in background]" : msg
+                if self?.note != detail { DebugLog.write("video: " + detail) }
+                self?.note = detail
                 self?.metrics?.decodeError(background: bg)
                 self?.broken = true
             }
@@ -100,7 +103,7 @@ extension ScreenSource {
     }
 
     /// The link (re)connected: chunk numbering starts over.
-    func resetStream() { assembler.reset(); clockOffset = nil }  // the board may have rebooted: its clock too
+    func resetStream() { assembler.reset(); clockOffset = nil; loggedFirstFrame = false }  // the board may have rebooted: its clock too
 
     /// A board timestamp (status `up`, or a streamed unit) just arrived: keep the smallest offset.
     func boardClock(ms: Int) {
@@ -115,6 +118,10 @@ extension ScreenSource {
     }
 
     private func publish(_ f: H264Decoder.Frame) {
+        if !loggedFirstFrame {
+            DebugLog.write("video: first decoded frame \(f.width)x\(f.height)")
+            loggedFirstFrame = true
+        }
         frame = f.jpeg
         updated = now()
         capturedAt = clockOffset.map { Double(f.unit.boardMs) / 1000 + $0 } ?? updated

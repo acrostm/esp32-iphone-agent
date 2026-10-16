@@ -1,18 +1,27 @@
 #include "board.hpp"
 #include "ble_link.hpp"
+#include "cJSON.h"
 #include "netcfg.hpp"
 #include "src/airplay/airplay.h"
 #include "stopwatch_model.h"
+#include "task_model.hpp"
 #include "tusb.h"
 #include "video_link.hpp"
 #include <M5Unified.h>
+#include <array>
 #include <esp_heap_caps.h>
 #include <esp_psram.h>
+#include <mutex>
 
 namespace {
 M5Canvas canvas(&M5.Display);
 bool display_ok = false, video_ok = false, airplay_ok = false, task_ok = false;
-bool details = false, dirty = true;
+unsigned page = 0;
+bool dirty = true;
+std::mutex task_lock;
+taskui::State task_state;
+std::atomic<bool> task_dirty{false}, task_focus{false};
+std::array<std::string, 5> video_messages;
 uint32_t last_draw = 0, last_battery = 0;
 int battery = -1;
 unsigned brightness_index = 1;
@@ -37,6 +46,11 @@ void row(int y, const char *label, const std::string &value, bool good = true) {
   canvas.drawString(value.c_str(), 386, y);
 }
 void draw() {
+  taskui::State task;
+  {
+    std::lock_guard<std::mutex> lock(task_lock);
+    task = task_state;
+  }
   const bool usb = tud_mounted() && !tud_suspended();
   const bool ble = ble_connected();
   const int ap = airplay_state();
@@ -46,7 +60,7 @@ void draw() {
   canvas.fillScreen(background);
   canvas.drawCircle(233, 233, 226, color);
   center("iPHONE AGENT", 57, muted);
-  center("StopWatch", 93, ink, 1.5f);
+  center(page == 1 ? "Task Monitor" : "StopWatch", 93, ink, 1.5f);
   char level[16];
   if (battery < 0)
     snprintf(level, sizeof level, "BAT --");
@@ -57,8 +71,17 @@ void draw() {
   canvas.setTextSize(0.75f);
   canvas.setTextColor(muted, background);
   canvas.drawString(level, 372, 119);
-  center(stopwatch::headline(state), 158, color);
-  if (!details) {
+  if (page == 1) {
+    const bool stale = task.stale(now_ms());
+    const uint32_t tone = stale || !strcmp(task.phase, "failed") ? warning : accent;
+    center(stale ? "STATUS LOST" : !strcmp(task.phase, "idle") ? "NO TASK" : task.phase, 158, tone, 1.25f);
+    row(205, "Step / action", std::to_string(task.step) + " / " + task.action);
+    for (int i = 0; i < 4; i++)
+      center(task.lines[i], 239 + i * 28, i == 0 ? ink : muted, 0.85f);
+    if (task.code[0])
+      center(task.code, 355, warning, 0.8f);
+  } else if (page == 0) {
+    center(stopwatch::headline(state), 158, color);
     row(205, "USB HID",
         !tud_mounted()    ? "Not connected"
         : tud_suspended() ? "Suspended"
@@ -73,6 +96,7 @@ void draw() {
     row(307, "AirPlay", airplay_ok ? mirror : "Start failed", airplay_ok);
     row(341, "Address", net_ip());
   } else {
+    center("DIAGNOSTICS", 158, color);
     const auto video = video_stats();
     row(205, "Video", video_ok ? std::to_string(int(video.fps)) + " fps" : "Buffer failed",
         video_ok);
@@ -81,10 +105,13 @@ void draw() {
         std::to_string(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024) + " KB");
     row(307, "PSRAM free",
         std::to_string(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024) + " KB");
-    row(341, "Heartbeat", task_ok ? "Running" : "Task failed", task_ok);
+    row(341, "Video config",
+        std::to_string(video.config_bytes) + " B / " + std::to_string(video.frames) + " frames",
+        video.config_bytes && video.frames);
   }
   char elapsed[20];
-  stopwatch::uptime(now_ms(), elapsed, sizeof elapsed);
+  stopwatch::uptime(page == 1 && strcmp(task.phase, "idle") ? task.elapsed_now(now_ms()) : now_ms(),
+                    elapsed, sizeof elapsed);
   center(elapsed, 382, muted);
   center("A: page   B: brightness", 411, muted, 0.75f);
   canvas.pushSprite(0, 0);
@@ -134,8 +161,10 @@ void stopwatch_poll() {
   if (!display_ok)
     return;
   M5.update();
+  if (task_dirty.exchange(false)) dirty = true;
+  if (task_focus.exchange(false)) page = 1;
   if (M5.BtnA.wasClicked()) {
-    details = !details;
+    page = (page + 1) % 3;
     dirty = true;
   }
   if (M5.BtnB.wasClicked()) {
@@ -155,4 +184,65 @@ void stopwatch_poll() {
     last_draw = now;
     dirty = false;
   }
+}
+
+bool stopwatch_task(const std::string &json) {
+  cJSON *j = cJSON_Parse(json.c_str());
+  if (!j)
+    return false;
+  auto text = [&](const char *name, const char *fallback) {
+    auto *v = cJSON_GetObjectItemCaseSensitive(j, name);
+    return cJSON_IsString(v) ? v->valuestring : fallback;
+  };
+  auto number = [&](const char *name) {
+    auto *v = cJSON_GetObjectItemCaseSensitive(j, name);
+    return cJSON_IsNumber(v) && v->valuedouble >= 0 && v->valuedouble <= 86400000 ? v->valuedouble
+                                                                                  : 0.0;
+  };
+  const bool reset = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "reset"));
+  bool ok;
+  {
+    std::lock_guard<std::mutex> lock(task_lock);
+    ok = task_state.apply(text("phase", ""), text("action", ""), text("code", ""), number("step"),
+                          number("ms"), number("elapsed"), now_ms(),
+                          reset);
+  }
+  cJSON_Delete(j);
+  if (ok) {
+    task_dirty = true;
+    std::lock_guard<std::mutex> lock(task_lock);
+    if (reset || task_state.terminal()) task_focus = true;
+  }
+  return ok;
+}
+void stopwatch_hid(const char *action, uint32_t duration) {
+  if (!taskui::action_ok(action))
+    return;
+  std::lock_guard<std::mutex> lock(task_lock);
+  task_state.log(action, duration);
+}
+void stopwatch_airplay_log(const char *message) {
+  // These protocol-only lines contain no credentials, typed text or image payload.
+  if (strncmp(message, "mirror:", 7) && strncmp(message, "pair-", 5) &&
+      strncmp(message, "fp-", 3) && strncmp(message, "setup: mirror", 13) &&
+      strcmp(message, "record") && strncmp(message, "teardown", 8))
+    return;
+  std::lock_guard<std::mutex> lock(task_lock);
+  for (size_t i = video_messages.size() - 1; i > 0; --i)
+    video_messages[i] = video_messages[i - 1];
+  video_messages[0] = std::string(message).substr(0, 80);
+}
+std::string stopwatch_diagnostics() {
+  std::lock_guard<std::mutex> lock(task_lock);
+  cJSON *j = cJSON_CreateArray();
+  if (!j)
+    return "[]";
+  for (const auto &line : video_messages)
+    if (!line.empty())
+      cJSON_AddItemToArray(j, cJSON_CreateString(line.c_str()));
+  char *raw = cJSON_PrintUnformatted(j);
+  std::string result = raw ? raw : "[]";
+  cJSON_free(raw);
+  cJSON_Delete(j);
+  return result.size() < 470 ? result : "[]";
 }

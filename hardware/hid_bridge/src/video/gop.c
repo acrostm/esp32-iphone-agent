@@ -43,6 +43,17 @@ int gop_push(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t t
   return g->n++;
 }
 
+bool gop_discard_prefix(gop_buf *g, int count) {
+  if (count <= 0 || count > g->n) return false;
+  size_t bytes = count == g->n ? g->used : g->aus[count].off;
+  memmove(g->arena, g->arena + bytes, g->used - bytes);
+  memmove(g->aus, g->aus + count, (g->n - count) * sizeof *g->aus);
+  g->n -= count;
+  g->used -= bytes;
+  for (int i = 0; i < g->n; i++) g->aus[i].off -= bytes;
+  return true;
+}
+
 bool annexb_has_idr(const uint8_t *p, size_t len) {
   for (size_t i = 0; i + 4 < len; i++)
     if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1 && (p[i + 3] & 0x1f) == 5) return true;

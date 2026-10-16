@@ -12,7 +12,7 @@ extension AppModel {
 
     /// Start a task (or a saved intent: its checklist goes to the actor as hints).
     func run(_ task: String, intent: SavedTask? = nil) async {
-        guard !agent.running, !recorder.recording else { return }
+        guard !agent.running, !startingAgent, !departing, !recorder.recording else { return }
         currentIntent = intent
         lastTask = task
         agent.hints = intent?.checklist ?? []
@@ -23,6 +23,10 @@ extension AppModel {
     }
 
     func startAgent(_ task: String) async {
+        guard !startingAgent, !agent.running else { return }
+        startingAgent = true
+        startupError = nil
+        defer { startingAgent = false }
         if MockMode.on { return mockRun(task) }
         guard settings.isConfigured else {
             say(String(localized: "Set up the model in Settings first."))
@@ -48,6 +52,7 @@ extension AppModel {
         FrameMode.fallback = nil  // each run starts in the chosen mode
         let snapMode = FrameMode.current == .snap
         do {
+            try await awaitInitialVideo()  // remain visible until the actual video path works
             if snapMode {
                 if feed.streamOn { try await feed.stream(false) }
                 mark("snap-per-step mode (stream off)")
@@ -61,6 +66,7 @@ extension AppModel {
             }
             live.start(task: task, runID: runID, limit: agent.maxSteps)
             mark("Live Activity started")
+            taskDisplay("running", action:"home", code:"preparing_screen")
             let left = now()
             var away = await leaveApp()
             if !away { away = await askUserToLeave() }
@@ -68,17 +74,36 @@ extension AppModel {
                 throw DeviceError(message: String(localized: "ESP32 Agent is still on screen"))
             }
             mark("app in background")
-            if !snapMode {
-                let changed = await feed.fresh(since: left, timeout: 3) != nil
-                await feed.settled()
-                mark(changed ? "screen changed and settled" : "no screen change seen in 3 s; settled")
+            if !board.connected {
+                taskDisplay("waiting", action:"video", code:"reconnecting_ble")
+                guard await board.commands.waitConnected(15) else {
+                    throw DeviceError(message: String(localized:"Board did not reconnect during task startup."))
+                }
+                try await feed.stream(true)
+                mark("BLE reconnected during startup")
             }
-            mark("first frame: " + (try await feed.currentFrame()))
+            if !snapMode {
+                taskDisplay("waiting", action:"video", code:"waiting_home_frame")
+                // Wait for a frame captured after leaving, rather than retransmitting
+                // a minutes-long GOP with snap while the live stream is catching up.
+                guard await feed.fresh(since: left, timeout: 20) != nil else {
+                    taskDisplay("failed", action:"error", code:"video_backlog")
+                    throw DeviceError(message: String(localized:"No new screen frame arrived after returning Home. The video stream is delayed or disconnected."))
+                }
+                await feed.settled()
+                mark("first frame: live after Home")
+            } else {
+                mark("first frame: " + (try await feed.currentFrame()))
+            }
+            taskDisplay("running",action:"think")
             try agent.start(task, traceStarted: true)
             mark("agent started")
             say("started: \(task)")
             began(task, early: true)
         } catch {
+            taskDisplay("failed",action:"error",code:displayPhase == "failed" ? displayCode : "start_failed")
+            runMood = .failure
+            startupError = error.localizedDescription
             say("cannot start: \(error.localizedDescription)")
             traces.write(feed.frame, kind: "step", ["action": .str("error"),
                                                     "reason": .str("cannot start: \(error.localizedDescription)")])
@@ -121,6 +146,7 @@ extension AppModel {
         guard agent.running, let last = agent.steps.last, help == nil else { return }
         let moved = !StepText.notMoves.contains(last["action"]?.str ?? "")
         runMood = moved ? .acting : .thinking
+        taskDisplay("running",action:last["action"]?.str ?? "wait",ms:Int(Date().timeIntervalSince(displayActionAt)*1000))
         live.update(mood: runMood ?? .thinking, step: moveCount, line: StepText.line(last), phase: .running)
         if moved {
             moodReset?.cancel()
@@ -135,6 +161,11 @@ extension AppModel {
     /// Between steps: what the character says in the Dynamic Island and where its eyes go.
     func doing(_ d: AgentLoop.Doing) {
         guard agent.running, help == nil else { return }
+        switch d {
+        case .looking: taskDisplay("running",action:"look")
+        case .thinking: taskDisplay("running",action:"think")
+        case .acting(let act): displayActionAt=Date(); taskDisplay("running",action:act["action"]?.str ?? "wait")
+        }
         switch d {
         case .looking: live.show(.looking, mood: .thinking)
         case .thinking: live.show(.thinking, mood: .thinking)
@@ -156,6 +187,7 @@ extension AppModel {
         let outcome = Outcome(last: last?["action"]?.str, running: false)
         let seconds = Date().timeIntervalSince(runStarted)
         runMood = outcome.mood
+        taskDisplay(outcome == .done ? "done" : outcome == .stopped ? "stopped" : "failed",action:outcome == .done ? "done" : outcome == .stopped ? "stopped" : "error",code:outcome == .failed ? "task_failed" : "")
         live.end((outcome.mood, last.map(StepText.line) ?? ""))
         runs.reload()
         let summary = String(localized: "\(moveCount) steps · \(seconds.durationText)")
@@ -241,6 +273,7 @@ extension AppModel {
         takingOver = false
         notifier.clearHelp()
         runMood = choice == .stop ? .idle : .thinking
+        taskDisplay(choice == .stop ? "stopped" : "running",action:choice == .stop ? "stopped" : "look")
         live.update(mood: runMood ?? .thinking, step: moveCount, line: String(localized: "Going on from here…"), phase: .running,
                     status: .looking)
         wait.resume(returning: choice)

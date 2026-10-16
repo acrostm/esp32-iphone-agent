@@ -25,6 +25,8 @@ struct BoardStatus: Codable, Equatable {
     var usb: String?   // ok | asleep | off
     var net: String?   // ap | sta | none
     var ip: String?
+    var ui: Int?
+    var vcfg: Int?, vaus: Int?, vwait: Int?, vdrop: Int?
     var sta: Int?
     var ap: String?    // idle | connected | streaming
     var w: Int?, h: Int?
@@ -42,6 +44,8 @@ struct BoardStatus: Codable, Equatable {
         m.w = n.w ?? w; m.h = n.h ?? h; m.kbps = n.kbps ?? kbps; m.fps = n.fps ?? fps; m.idr = n.idr ?? idr
         m.gop = n.gop ?? gop
         let a = ble ?? BLE(), b = n.ble ?? BLE()
+        m.ui = n.ui ?? ui; m.vcfg = n.vcfg ?? vcfg; m.vaus = n.vaus ?? vaus
+        m.vwait = n.vwait ?? vwait; m.vdrop = n.vdrop ?? vdrop
         m.ble = BLE(mtu: b.mtu ?? a.mtu, phy: b.phy ?? a.phy, kbps: b.kbps ?? a.kbps, drop: b.drop ?? a.drop)
         return m
     }

@@ -97,6 +97,26 @@ static void test_gop(void) {
   CHECK(gop_push(&g, au, 10, false, 6) == -1);
   CHECK(gop_push(&g, au, 10, true, 7) == 0 && !g.wait_idr);
 
+  // A live consumer can reclaim acknowledged data without waiting for an IDR.
+  uint32_t gen = g.gen;
+  CHECK(gop_push(&g, au, 30, false, 8) == 1);
+  CHECK(!gop_discard_prefix(&g, -1) && !gop_discard_prefix(&g, 3));
+  CHECK(gop_discard_prefix(&g, 1));
+  CHECK(g.n == 1 && g.used == 30 && g.aus[0].off == 0 && g.aus[0].ts == 8);
+  CHECK(!g.wait_idr && g.gen == gen && !memcmp(g.arena, au, 30));
+  CHECK(gop_push(&g, au, 30, false, 9) == 1);
+  CHECK(gop_discard_prefix(&g, 2) && g.n == 0 && g.used == 0);
+  CHECK(gop_push(&g, au, 30, false, 10) == 0 && !g.wait_idr);
+  CHECK(gop_push(&g, au, 30, true, 11) == 0 && g.gen != gen);
+
+  gen = g.gen;
+  for (int i = 0; i < 10000; i++) {
+    if (g.used >= 60) CHECK(gop_discard_prefix(&g, 1));
+    CHECK(gop_push(&g, au, 30, false, 12 + i) >= 0);
+    CHECK(g.used <= 90 && !g.wait_idr && g.gen == gen);
+  }
+  CHECK(g.overflows == 1); // only the deliberate overflow above, never the live stream
+
   uint8_t idr[] = {0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x65, 9};
   CHECK(annexb_has_idr(idr, sizeof idr));
   CHECK(!annexb_has_idr(idr, 6));

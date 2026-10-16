@@ -16,3 +16,7 @@ uint32_t ble_kbps();        // video bytes out, last second
 uint32_t ble_drops();       // video notifies we failed to send
 uint32_t ble_reply_drops(); // replies that never got out to a subscribed peer
 int ble_peers();            // connected centrals
+
+int ble_encrypted_peers();
+int ble_security_result();
+int ble_disconnect_reason();

@@ -36,6 +36,9 @@ void gop_init(gop_buf *g, uint8_t *arena, size_t cap, gop_au *aus, int max);
 void gop_set_config(gop_buf *g, const uint8_t *annexb, size_t len, uint32_t ts);
 // Appends one Annex-B access unit. Returns its index, or -1 if it was dropped.
 int gop_push(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t ts);
+// Reclaim an already-delivered prefix without breaking a live decoder chain.
+// After this call the remaining buffer may not be independently replayable.
+bool gop_discard_prefix(gop_buf *g, int count);
 // True if the Annex-B data contains an IDR slice (NAL type 5).
 bool annexb_has_idr(const uint8_t *p, size_t len);
 // Rewrites AVCC (4-byte big-endian length prefixes) in place into Annex-B start codes.

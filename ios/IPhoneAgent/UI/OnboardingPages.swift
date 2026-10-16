@@ -124,7 +124,7 @@ struct SeePage: View {
                 CheckRow(title: "Start Screen Mirroring", done: streaming, active: joined && !streaming)
             }
             if !joined {
-                if let net = app.manualHotspot, let ssid = net.ssid, failure != nil { manual(ssid: ssid, pass: net.pass) }
+                if let net = app.manualHotspot ?? board.net, let ssid = net.ssid { manual(ssid: ssid, pass: net.pass) }
                 Label("Internet uses cellular data while on the board's Wi-Fi.", systemImage: "antenna.radiowaves.left.and.right")
                     .font(.footnote).foregroundStyle(.secondary)
                 Button("I'm already on the board's Wi-Fi") { onWiFi = true }.font(.footnote)

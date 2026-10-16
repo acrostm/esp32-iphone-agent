@@ -27,6 +27,12 @@ struct HomeView: View {
                 if recorder.recording || recorder.inferring || recorder.error != nil {
                     RecordingPanel(recorder: recorder)
                 }
+                if let error = app.startupError {
+                    Section("Could not start") {
+                        Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+                        Button("Dismiss") { app.startupError = nil }
+                    }
+                }
                 if app.help != nil { HelpPanel(app: app) }
                 if let stage = app.recovering { RecoveryPanel(app: app, stage: stage) }
                 if agent.running || app.runMood != nil { liveSection }

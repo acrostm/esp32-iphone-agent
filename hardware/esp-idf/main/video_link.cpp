@@ -18,6 +18,7 @@ struct Req {
 };
 
 static gop_buf gop;
+static bool replayable = true;
 static SemaphoreHandle_t lock;
 static uint8_t *scratch;
 static QueueHandle_t reqs;
@@ -58,10 +59,10 @@ static bool copyAu(uint32_t gen, int i, gop_au *au) {
 }
 
 // Snapshot of the GOP state: generation, AU count, SPS/PPS.
-static bool snapshot(uint32_t *gen, int *n, uint8_t *cfg, size_t *cfg_len, uint32_t *cfg_ts) {
+static bool snapshot(uint32_t *gen, int *n, uint8_t *cfg, size_t *cfg_len, uint32_t *cfg_ts, bool live = false) {
   xSemaphoreTake(lock, portMAX_DELAY);
   *gen = gop.gen;
-  *n = gop.wait_idr ? 0 : gop.n;
+  *n = gop.wait_idr || (!live && !replayable) ? 0 : gop.n;
   *cfg_len = gop.cfg_len;
   *cfg_ts = gop.cfg_ts;
   memcpy(cfg, gop.cfg, gop.cfg_len);
@@ -77,8 +78,12 @@ static std::string doSnap() {
     uint32_t gen, cfg_ts;
     size_t cfg_len;
     int n;
-    if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts))
-      return "err no video (start screen mirroring)";
+    if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts)) {
+      auto v = video_stats();
+      return v.config_bytes == 0 ? "err video config missing"
+             : v.waiting_idr     ? "err waiting for video keyframe"
+                                 : "err video replay unavailable";
+    }
     if (!sendAu(cfg, cfg_len, VF_CONFIG | VF_SNAP, cfg_ts))
       return "err ble send failed";
     bool complete = true;
@@ -128,9 +133,13 @@ static void streamStep() {
   uint32_t gen, cfg_ts;
   size_t cfg_len;
   int n;
-  if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts))
+  if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts, true))
     return;
   if (gen != txGen) {
+    xSemaphoreTake(lock, portMAX_DELAY);
+    const bool canReplay = replayable;
+    xSemaphoreGive(lock);
+    if (!canReplay) return; // a new decoder must wait for an independently decodable GOP
     txGen = gen;
     next = 0;
     if (!sendAu(cfg, cfg_len, VF_CONFIG, cfg_ts)) {
@@ -144,6 +153,15 @@ static void streamStep() {
       txGen = UINT32_MAX;
       return;
     }
+  // Only this worker mutates the transmit cursor. Reclaim fully sent units under
+  // the producer's lock, preserving all unsent P-frame dependencies and generation.
+  xSemaphoreTake(lock, portMAX_DELAY);
+  if (gop.gen == gen && next > 0 && gop.used >= GOP_CAP / 2 &&
+      gop_discard_prefix(&gop, next)) {
+    next = 0;
+    replayable = false;
+  }
+  xSemaphoreGive(lock);
 }
 
 static void videoTask(void *) {
@@ -225,6 +243,7 @@ void video_on_au(const uint8_t *au, size_t len, bool idr) {
     winStart = now;
   }
   xSemaphoreTake(lock, portMAX_DELAY);
+  if (idr) replayable = true;
   gop_push(&gop, au, len, idr, now);
   xSemaphoreGive(lock);
   xTaskNotifyGive(task);
@@ -251,7 +270,16 @@ VideoStats video_stats() {
     return {};
   bool fresh = now_ms() - statAt < 3000; // mirroring stopped: report zeros, not stale numbers
   xSemaphoreTake(lock, portMAX_DELAY);
-  uint32_t gopBytes = gop.used;
+  uint32_t gopBytes = gop.used, configBytes = gop.cfg_len, frames = gop.n,
+           overflows = gop.overflows;
+  bool waiting = gop.wait_idr;
   xSemaphoreGive(lock);
-  return {fresh ? statKbps.load() : 0, statIdrMs.load(), gopBytes, fresh ? statFps.load() : 0};
+  return {fresh ? statKbps.load() : 0,
+          statIdrMs.load(),
+          gopBytes,
+          fresh ? statFps.load() : 0,
+          configBytes,
+          frames,
+          overflows,
+          waiting};
 }

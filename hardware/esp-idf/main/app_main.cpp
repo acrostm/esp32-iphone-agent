@@ -39,6 +39,10 @@ std::string board(const std::string &line, const std::string &id) {
   auto arg = sp == std::string::npos ? std::string{} : line.substr(sp + 1);
   long a = 0, b = 0;
   int n = sscanf(arg.c_str(), "%ld %ld", &a, &b);
+  if (cmd == "task")
+    return stopwatch_task(arg) ? "ok" : "err invalid task status";
+  if (cmd == "diag")
+    return stopwatch_diagnostics();
   if (cmd == "status")
     return statusJson(true); // read-only diagnostics; no HID reports
   if (cmd == "stream") {
@@ -86,25 +90,33 @@ std::string board(const std::string &line, const std::string &id) {
     ble_unpair();
     return "";
   }
-  return usb_command(line);
+  const uint32_t began = now_ms();
+  auto result = usb_command(line);
+  stopwatch_hid(cmd.c_str(), now_ms() - began);
+  return result;
 }
 
 std::string statusJson(bool full) {
   static const char *apStates[] = {"idle", "connected", "streaming"};
   VideoStats v = video_stats();
-  char s[384];
-  snprintf(s, sizeof s,
-           "{\"up\":%lu,\"rst\":\"%s\",\"heap\":%u,\"psram\":%u,\"usb\":\"%s\",\"net\":\"%s\","
-           "\"ip\":\"%s\",\"sta\":%d,"
-           "\"ap\":\"%s\",\"w\":%u,\"h\":%u,\"kbps\":%lu,\"fps\":%.1f,\"idr\":%lu,\"gop\":%lu,"
-           "\"ble\":{\"mtu\":%u,\"phy\":%u,\"kbps\":%lu,\"drop\":%lu,\"rdrop\":%lu,\"n\":%d}}",
-           (unsigned long)now_ms(), resetReason(),
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), usb_state(), net_mode(),
-           net_ip().c_str(), net_peers(), apStates[airplay_state()], cfg_width(), cfg_height(),
-           (unsigned long)v.kbps, v.fps, (unsigned long)v.idr_ms, (unsigned long)v.gop_bytes,
-           ble_mtu(), ble_phy(), (unsigned long)ble_kbps(), (unsigned long)ble_drops(),
-           (unsigned long)ble_reply_drops(), ble_peers());
+  char s[512];
+  snprintf(
+      s, sizeof s,
+      "{\"up\":%lu,\"rst\":\"%s\",\"heap\":%u,\"psram\":%u,\"usb\":\"%s\",\"net\":\"%s\","
+      "\"ip\":\"%s\",\"sta\":%d,"
+      "\"ui\":1,\"vcfg\":%u,\"vaus\":%u,\"vwait\":%u,\"vdrop\":%u,\"ap\":\"%s\",\"w\":%u,\"h\":%u,"
+      "\"kbps\":%lu,\"fps\":%.1f,\"idr\":%lu,\"gop\":%lu,"
+      "\"ble\":{\"mtu\":%u,\"phy\":%u,\"kbps\":%lu,\"drop\":%lu,\"rdrop\":%lu,\"n\":%d,"
+      "\"enc\":%d,\"sec\":%d,\"disc\":%d}}",
+      (unsigned long)now_ms(), resetReason(),
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), usb_state(), net_mode(),
+      net_ip().c_str(), net_peers(), (unsigned)v.config_bytes, (unsigned)v.frames,
+      (unsigned)v.waiting_idr, (unsigned)v.overflows, apStates[airplay_state()], cfg_width(),
+      cfg_height(), (unsigned long)v.kbps, v.fps, (unsigned long)v.idr_ms,
+      (unsigned long)v.gop_bytes, ble_mtu(), ble_phy(), (unsigned long)ble_kbps(),
+      (unsigned long)ble_drops(), (unsigned long)ble_reply_drops(), ble_peers(),
+      ble_encrypted_peers(), ble_security_result(), ble_disconnect_reason());
   if (full)
     return s;
   // MTU below ~250 (before the MTU exchange): keep only the fields the app needs to stay alive
@@ -171,6 +183,7 @@ extern "C" void app_main() {
   cfg.max_fps = cfg_fps();
   cfg.on_config = video_on_config;
   cfg.on_au = video_on_au;
+  cfg.log = stopwatch_airplay_log;
   bool airplay = video && airplay_start(&cfg);
   bool tasks = xTaskCreate(status_task, "status", 4096, nullptr, 1, nullptr) == pdPASS;
   tasks = (xTaskCreate(command_task, "commands", 6144, nullptr, 2, nullptr) == pdPASS) && tasks;
